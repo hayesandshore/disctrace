@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DiscTrace bench</title>
+  <meta name="description" content="Connect to a DGT-1 disc pod, capture a throw, and read the spin and acceleration data.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2312211b'/%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%23f2c230' stroke-width='3'/%3E%3Ccircle cx='21' cy='20' r='2.5' fill='%23f2c230'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>DiscTrace bench</h1>
+    <p class="link-line"><span id="link-text">Not connected</span>
+      <button type="button" id="link-disconnect" class="text-button" hidden>Disconnect</button></p>
+  </header>
+
+  <div class="layout">
+    <div class="rail">
+      <section class="pod" id="pod" aria-label="Pod"></section>
+      <p id="pod-status" class="sr-only" role="status"></p>
+
+      <section class="tools" aria-label="Pod tools">
+        <details id="tools-details">
+          <summary>Pod tools</summary>
+          <div id="tools-body"></div>
+        </details>
+        <details id="log-details">
+          <summary>Bluetooth log</summary>
+          <ol id="log" class="log"></ol>
+          <button type="button" id="log-copy" class="quiet">Copy log</button>
+        </details>
+      </section>
+
+      <section class="history" aria-labelledby="history-title">
+        <h2 id="history-title">Saved throws</h2>
+        <p id="history-note" class="note" hidden></p>
+        <ul id="history-list" class="history-list"></ul>
+        <details id="import-details">
+          <summary>Import a capture</summary>
+          <p class="note">Choose a saved CSV, or paste terminal output that contains a DUMP.</p>
+          <input type="file" id="import-file" accept=".csv,.txt,text/plain,text/csv">
+          <textarea id="import-text" rows="4" aria-label="Pasted capture text"
+            placeholder="t_ms,ax_g,ay_g,az_g,…"></textarea>
+          <button type="button" id="import-go" class="quiet">Import pasted text</button>
+          <p id="import-error" class="problem" hidden></p>
+        </details>
+      </section>
+    </div>
+
+    <main id="throw" class="throw" tabindex="-1"></main>
+  </div>
+
+  <noscript>This page needs JavaScript to talk to the pod.</noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

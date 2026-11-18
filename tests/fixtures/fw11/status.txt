@@ -1,0 +1,1 @@
+READY samples=3 peak_g=1.00 peak_abs_rpm=NEAR_LIMIT max_gap_ms=10.0 rate_hz=100.0
