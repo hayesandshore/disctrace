@@ -51,9 +51,9 @@ def test_one_sensor_missing_does_not_blame_the_other():
     assert "LSM6DS3TR-C" in reply and "ADXL375" not in reply
 
 
-def test_fault_is_sent_when_a_phone_connects_without_being_asked():
-    world = run(1.0, sensor_start_fail=missing("adxl"))
-    assert world.lines and world.lines[0].startswith("SENSOR_ERROR ")
+def test_fault_waiting_at_power_up_arrives_once_the_phone_speaks():
+    world = run(1.0, [(0.5, b"HELLO\n")], sensor_start_fail=missing("adxl"))
+    assert any(line.startswith("SENSOR_ERROR ") and "ADXL375" in line for line in world.lines)
 
 
 def test_usb_console_names_the_fault_and_does_not_say_ready():
@@ -85,6 +85,58 @@ def test_other_commands_with_a_missing_sensor_keep_the_pod_answering():
     bench_reply = lines_after(world, 1.5)[0]
     assert "ADXL375" in bench_reply or bench_reply.startswith("State SENSOR_ERROR.")
     assert lines_after(world, 3.5)[0].startswith("SENSOR_ERROR ")
+
+
+# A sensor driver that hangs instead of failing ---------------------------------------
+def test_pod_advertises_even_if_a_sensor_driver_hangs_at_power_up():
+    for part in ("adxl", "imu"):
+        world = run(5.0, sensor_start_hang=lambda t, part=part: (part,), **OFFLINE)
+        assert world.advertise_calls >= 1, part
+
+
+def test_usb_console_says_the_sensors_were_starting_when_a_driver_hung():
+    console = run(5.0, sensor_start_hang=lambda t: ("imu",), **OFFLINE).console
+    assert "sensors" in console.strip().splitlines()[-1].lower()
+
+
+# Arming again after a sensor fault ------------------------------------------------------
+def test_arm_after_a_sensor_fault_restarts_the_sensors():
+    # A power glitch at 1.5 s makes a read fail and leaves both sensors switched
+    # off, reading zeros. The next ARM must switch them back on or nothing triggers.
+    world = run(17.0, [(1.0, b"ARM\n"), (3.0, b"ARM\n"), (16.0, b"STATUS\n")],
+                gyro=spin(150, 4.0, 4.5), sensor_fail=lambda t: 1.5 <= t < 1.55, lose_settings=True)
+    assert lines_after(world, 3.0)[0] == "ARMED"
+    assert lines_after(world, 16.0)[0].startswith("READY samples=")
+
+
+def test_arm_after_a_fault_that_cut_a_recording_short_restarts_the_sensors():
+    # The glitch comes mid-recording: the partial capture is kept, so the pod is
+    # READY rather than in SENSOR_ERROR, but the sensors are just as switched off.
+    two_spins = lambda t: spin(150, 2.0, 2.5)(t) if t < 6.0 else spin(150, 7.0, 7.5)(t)
+    world = run(20.0, [(1.0, b"ARM\n"), (5.0, b"ARM\n"), (5.5, b"ARM\n"), (19.0, b"STATUS\n")],
+                gyro=two_spins, sensor_fail=lambda t: 4.0 <= t < 4.05, lose_settings=True)
+    assert lines_after(world, 5.5)[0] == "ARMED"          # the second ARM discards the partial capture
+    second = lines_after(world, 19.0)[0]
+    assert second.startswith("READY samples=") and "partial=1" not in second
+
+
+# Lines that were waiting while the phone was out of range ------------------------------
+def test_arm_timeout_while_out_of_range_is_reported_after_reconnect():
+    world = run(3606.0, [(1.0, b"ARM\n"), (3604.0, b"HELLO\n")], jumps=[(2.0, 3600.0)],
+                connected=lambda t: t < 1.5 or t >= 3603.0)
+    assert "IDLE armed timeout" in lines_after(world, 3603.0)
+
+
+def test_sensor_fault_reason_while_out_of_range_is_reported_after_reconnect():
+    world = run(6.0, [(1.0, b"ARM\n"), (4.5, b"HELLO\n")],
+                connected=lambda t: t < 1.3 or t >= 4.0, sensor_fail=lambda t: 1.5 <= t < 1.55)
+    assert any(line.startswith("SENSOR_ERROR [Errno 5]") for line in lines_after(world, 4.0))
+
+
+def test_status_reply_is_not_sent_again_as_the_waiting_line():
+    world = hand_spin([(13.5, b"STATUS\n")], connected=lambda t: not 1.5 <= t < 13.0)
+    ready = [line for line in lines_after(world, 13.0) if line.startswith("READY ")]
+    assert len(ready) == 1
 
 
 # A sensor read that fails in an unexpected way ---------------------------------------
