@@ -289,6 +289,97 @@ test("stopping a reconnect leaves the link down even if an attempt then succeeds
   assert.equal(sim.connected, false);
 });
 
+// A pod that does not answer -----------------------------------------------------------------
+// The link comes up, the pod receives commands, and nothing comes back.
+// Cleanup is registered up front so a failed assertion cannot leave timers running.
+async function connectSilent(t, { pollMs = 10, ...simOptions } = {}) {
+  const sim = new SimPod({ speed: 2000, ...simOptions });
+  sim.mute = true;
+  const client = new PodClient({ busyAfterMs: 10, replyTimeoutMs: 60, pollMs, retryMs: 5 });
+  t.after(() => client.disconnect());
+  const seen = new Set();
+  const notes = [];
+  client.on("change", () => seen.add(client.state.pod));
+  client.on("log", (entry) => notes.push(entry.text));
+  await assert.rejects(client.connect(sim), /did not answer STATUS/);
+  return { sim, client, seen, notes };
+}
+
+test("a pod that connects but never answers is not shown as recording", async (t) => {
+  const { client, seen } = await connectSilent(t);
+  assert.equal(client.state.link, "connected");
+  assert.equal(client.state.pod, "UNKNOWN");
+  assert.ok(!seen.has("RECORDING"));    // nothing says it is recording: its state was never known
+});
+
+test("a pod that never answers leaves the reason in the state", async (t) => {
+  const { client } = await connectSilent(t);
+  assert.equal(client.state.error, "The pod did not answer STATUS.");
+});
+
+test("an unanswered command is noted in the log", async (t) => {
+  const { client, notes } = await connectSilent(t);
+  assert.ok(notes.includes("The pod did not answer STATUS."));
+});
+
+test("checking again on request recovers a pod that was silent", async (t) => {
+  const { sim, client } = await connectSilent(t, { pollMs: 60000 });   // no polling: only the request can do it
+  sim.mute = false;
+  await client.check();
+  assert.equal(client.state.pod, "IDLE");
+  assert.equal(client.state.firmware, "1.1");
+  assert.equal(client.state.error, null);
+});
+
+test("a silent pod that starts answering is picked up without pressing anything", async (t) => {
+  const { sim, client } = await connectSilent(t);
+  sim.mute = false;
+  await until(() => client.state.pod === "IDLE" && client.state.firmware === "1.1", "the pod's state and firmware");
+  assert.equal(client.state.error, null);
+});
+
+test("a 1.0 pod that was silent on connect is still polled for its capture", async (t) => {
+  const { sim, client } = await connectSilent(t, { firmware: "1.0", speed: 100 });   // 5 s window -> 50 ms
+  client.options.replyTimeoutMs = 400;
+  sim.mute = false;
+  await until(() => client.state.pod === "IDLE", "IDLE once the pod answers");
+  await armAndThrow(sim, client);       // 1.0 never pushes READY, so only polling can find it
+  assert.ok(client.state.summary.samples > 500);
+});
+
+test("an armed pod that stays silent past the reply timeout is shown as not answering", async (t) => {
+  const sim = new SimPod({ speed: 2000 });
+  const client = new PodClient({ busyAfterMs: 10, replyTimeoutMs: 60, pollMs: 10 });
+  t.after(() => client.disconnect());
+  await client.connect(sim);
+  await client.arm();
+  sim.mute = true;
+  await until(() => client.state.pod === "UNKNOWN", "the pod to be marked as not answering");
+  assert.equal(client.state.error, "The pod did not answer STATUS.");
+});
+
+// What the Bluetooth log records about a failed link ---------------------------------------
+test("a failed connection attempt is written to the log", async (t) => {
+  const sim = new SimPod({ speed: 2000 });
+  sim.outOfRange = true;
+  const client = new PodClient();
+  const notes = [];
+  client.on("log", (entry) => notes.push(entry.text));
+  await assert.rejects(client.connect(sim), /out of range/);
+  assert.ok(notes.includes("The simulated pod is out of range."));
+});
+
+test("a reconnect that keeps failing is written to the log once, not on every attempt", async (t) => {
+  const { sim, client } = await setup();
+  t.after(() => client.disconnect());
+  const notes = [];
+  client.on("log", (entry) => notes.push(entry.text));
+  sim.setOutOfRange(true);
+  await until(() => client.state.link === "reconnecting", "reconnecting");
+  await sleep(60);                       // a dozen attempts at this retry pace
+  assert.equal(notes.filter((text) => text === "The simulated pod is out of range.").length, 1);
+});
+
 // Pushed notices and tools ---------------------------------------------------------------
 test("an armed-timeout notice returns the pod to IDLE and is kept for display", async () => {
   const { sim, client } = await setup();

@@ -78,6 +78,7 @@ export class PodClient {
     try {
       await transport.connect();
     } catch (error) {
+      this.log("info", error.message);
       this.set({ link: "disconnected" });
       throw error;
     }
@@ -88,9 +89,15 @@ export class PodClient {
     this.splitter.reset();
     this.set({ link: "connected", error: null });
     this.log("info", `Connected to ${this.transport.name}.`);
+    this.startPolling();                        // first, so a pod that is slow to answer is still followed up
+    await this.check();
+  }
+
+  /** Asks the pod where it stands: STATUS, then INFO if its firmware is not
+   *  known yet. Also the way back from a pod that did not answer. */
+  async check() {
     await this.refresh();                       // always ask STATUS first
     if (this.state.firmware === null) await this.identify();
-    this.startPolling();
   }
 
   async disconnect() {
@@ -115,10 +122,15 @@ export class PodClient {
   }
 
   async reconnectLoop(transport) {
+    let reported = null;
     while (!this.intentional && this.transport === transport && this.state.link === "reconnecting") {
       try {
         await transport.connect();
-      } catch {
+      } catch (error) {
+        if (error.message !== reported) {       // once per reason, not once per attempt
+          reported = error.message;
+          this.log("info", reported);
+        }
         await sleep(this.options.retryMs);
         continue;
       }
@@ -139,10 +151,12 @@ export class PodClient {
   startPolling() {
     this.stopPolling();
     this.pollTimer = unref(setInterval(() => {
-      const waiting = this.state.pod === "ARMED" || this.state.pod === "RECORDING";
+      // Waiting for a throw, or for a pod that has not answered yet.
+      const { pod } = this.state;
+      const waiting = pod === "ARMED" || pod === "RECORDING" || pod === "UNKNOWN";
       if (this.state.link !== "connected" || !waiting || this.pending || this.dump || this.polling) return;
       this.polling = true;                      // at most one STATUS outstanding
-      this.refresh().catch(() => {}).finally(() => {
+      this.check().catch(() => {}).finally(() => {
         this.polling = false;
       });
     }, this.options.pollMs));
@@ -171,12 +185,17 @@ export class PodClient {
       }
       const pending = { command, accept, resolve, reject };
       pending.timer = setTimeout(() => {
-        this.settle(pending).reject(new Error(`The pod did not answer ${command}.`));
+        const error = new Error(`The pod did not answer ${command}.`);
+        this.log("info", error.message);
+        // Silence this long outlasts any recording, so stop guessing what the pod is doing.
+        if (watchBusy) this.set({ pod: "UNKNOWN", error: error.message });
+        this.settle(pending).reject(error);
       }, this.options.replyTimeoutMs);
       if (watchBusy) {
         pending.busyTimer = setTimeout(() => {
-          const pod = this.state.pod;
-          if (this.pending === pending && (pod === "ARMED" || pod === "UNKNOWN")) this.set({ pod: "RECORDING" });
+          // An armed pod that goes quiet has started recording. A pod whose state
+          // was never known could be silent for any reason, so it stays unknown.
+          if (this.pending === pending && this.state.pod === "ARMED") this.set({ pod: "RECORDING" });
         }, this.options.busyAfterMs);
       }
       this.pending = pending;
@@ -328,7 +347,7 @@ export class PodClient {
       case "ready": {
         const previous = this.state.summary;
         const sameCapture = previous && previous.raw === kind.summary.raw;
-        this.set({ pod: "READY", summary: kind.summary, saved: sameCapture ? this.state.saved : false });
+        this.set({ pod: "READY", summary: kind.summary, saved: sameCapture ? this.state.saved : false, error: null });
         break;
       }
       case "notice":
@@ -351,7 +370,7 @@ export class PodClient {
   }
 
   applyPod(pod) {
-    if (pod === "READY") this.set({ pod });
-    else this.set({ pod, summary: null, saved: false });
+    if (pod === "READY") this.set({ pod, error: null });
+    else this.set({ pod, summary: null, saved: false, error: null });
   }
 }

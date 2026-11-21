@@ -112,9 +112,18 @@ export function podView({ state, sim, bluetooth, confirmDiscard, failure }) {
       view.primary = { id: "arm", label: "Arm again" };
       break;
     default:
-      view.tone = "idle";
-      view.title = "Checking the pod";
-      view.detail = state.error || "Waiting for the pod to answer.";
+      if (state.error) {
+        view.tone = "warning";
+        view.title = "The pod is not answering";
+        view.detail = `${state.error} The link is up and this page keeps asking. `
+          + "Try again now, or disconnect and restart the pod.";
+        view.primary = { id: "check", label: "Try again" };
+        view.secondary.push({ id: "disconnect", label: "Disconnect" });
+      } else {
+        view.tone = "idle";
+        view.title = "Checking the pod";
+        view.detail = "Waiting for the pod to answer.";
+      }
       break;
   }
   return view;
