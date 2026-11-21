@@ -58,5 +58,6 @@ Above about 317 RPM the gyro cannot read spin, so the page estimates it from the
 | `js/view.js` | Which message and buttons the pod panel shows in each state. |
 | `js/chart.js`, `js/store.js`, `js/app.js` | Charts, saved throws (IndexedDB), page wiring. |
 | `tests/` | Tests for the logic above. Run `npm test` (needs Node 22 or later, nothing to install). |
+| `firmware/` | The pod's CircuitPython firmware (1.0.1 and 1.1.1), its simulator tests and install notes. Start with `firmware/CHANGES.md`. |
 
 `protocol.js`, `client.js`, `metrics.js` and `view.js` use no browser features, so a native iPhone app could reuse their rules.
