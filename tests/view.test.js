@@ -112,3 +112,10 @@ test("reconnecting on the simulated pod offers to come back in range", () => {
 test("an unknown pod state while connected shows a checking message", () => {
   assert.match(view({ pod: "UNKNOWN" }).title, /checking/i);
 });
+
+test("a connected pod that does not answer says so and offers Try again and Disconnect", () => {
+  const v = view({ pod: "UNKNOWN", error: "The pod did not answer STATUS." });
+  assert.match(v.title, /not answering/i);
+  assert.match(v.detail, /did not answer STATUS/);
+  assert.deepEqual(ids(v), ["check", "disconnect"]);
+});

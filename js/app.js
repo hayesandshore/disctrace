@@ -76,7 +76,8 @@ async function run(task) {
   try {
     await task();
   } catch (error) {
-    ui.message = error.name === "NotFoundError" ? "No pod was chosen." : error.message;
+    // A pod that is not answering is already explained by the panel itself.
+    ui.message = error.message === client.state.error ? null : error.message;
   }
   ui.busy = false;
   renderPod();
@@ -142,6 +143,7 @@ const ACTIONS = {
   "connect-sim": () => connect(new SimPod({ firmware: ui.simFirmware, speed: SIM_SPEED })),
   arm: () => arm(false),
   cancel: () => run(() => client.cancel()),
+  check: () => run(() => client.check()),
   download: () => downloadAndSave(),
   discard: () => {
     ui.confirmDiscard = true;
