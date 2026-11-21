@@ -272,9 +272,11 @@ def test_capture_finishes_while_the_phone_is_out_of_range():
     assert lines_after(world, 13.5)[0].startswith("READY samples=")
 
 
-def test_ready_summary_is_delivered_on_reconnect():
-    world = hand_spin(connected=lambda t: not 1.5 <= t < 13.0)
-    assert any(line.startswith("READY samples=") for line in lines_after(world, 13.0))
+def test_ready_summary_waiting_at_reconnect_arrives_once_the_phone_speaks():
+    # A line written the moment a phone connects is lost, because the phone has
+    # not subscribed yet. The pod keeps it until the phone sends something.
+    world = hand_spin([(13.5, b"HELLO\n")], connected=lambda t: not 1.5 <= t < 13.0)
+    assert any(line.startswith("READY samples=") for line in lines_after(world, 13.5))
 
 
 # Sensor faults ---------------------------------------------------------------------
@@ -305,7 +307,7 @@ def test_arm_recovers_after_a_sensor_error():
 # New in 1.1: INFO and BENCH ----------------------------------------------------------
 def test_info_reports_version_and_capture_layout():
     world = run(1.0, [(0.5, b"INFO\n")])
-    assert world.lines == ["DGT-1 fw=1.1.1 target_hz=100 window_s=10 pre=30 cols=12"]
+    assert world.lines == ["DGT-1 fw=1.1.2 target_hz=100 window_s=10 pre=30 cols=12"]
 
 
 def test_bench_counts_three_sensor_reads_for_one_second():
@@ -323,6 +325,14 @@ def test_bench_leaves_a_ready_capture_alone():
     world = hand_spin([(12.5, b"BENCH\n"), (14.0, b"STATUS\n")])
     ready = [line for line in world.lines if line.startswith("READY ")]
     assert len(ready) == 2 and ready[0] == ready[1]
+
+
+def test_arm_after_a_sensor_fault_during_bench_restarts_the_sensors():
+    # The fault is seen by BENCH while the pod is idle, so the state stays IDLE.
+    world = run(17.0, [(0.5, b"BENCH\n"), (3.0, b"ARM\n"), (16.0, b"STATUS\n")],
+                gyro=spin(150, 4.0, 4.5), sensor_fail=lambda t: 0.8 <= t < 0.85, lose_settings=True)
+    assert lines_after(world, 3.0)[0] == "ARMED"
+    assert lines_after(world, 16.0)[0].startswith("READY samples=")
 
 
 def test_bench_reports_a_sensor_fault():

@@ -37,7 +37,8 @@ class World:
                  connected=None, sensor_fail=None, jumps=(),
                  read_cost_ns=800_000, write_cost_ns=200_000,
                  sensor_start_fail=None, sensor_error=None, advertise_fail=None,
-                 advertise_stuck=None, write_fail=None, read_fail=None, connected_error=None):
+                 advertise_stuck=None, write_fail=None, read_fail=None, connected_error=None,
+                 subscribe_delay=0.15, sensor_start_hang=None, lose_settings=False):
         self.now = 0
         self.end_ns = int(end_s * 1e9)
         self.pending = sorted(commands)                 # [(seconds, bytes)] from the phone
@@ -67,6 +68,17 @@ class World:
         self.advertise_failures = 0
         self.advertise_stops = 0
         self.reloads = 0                                # supervisor.reload() calls
+        # A phone subscribes to notifications a moment after it connects. Until
+        # then the radio drops what the pod writes, without reporting an error.
+        self.subscribe_delay = subscribe_delay          # seconds
+        self.connected_since = 0.0
+        self.dropped_writes = 0
+        self.sensor_start_hang = sensor_start_hang or (lambda t: ())   # parts whose driver never returns
+        # A sensor that loses power comes back switched off and reads zeros
+        # until its driver is constructed again. With lose_settings, any failed
+        # read counts as such a power loss.
+        self.lose_settings = lose_settings
+        self.standby = set()                            # parts reading zeros: "adxl", "imu"
 
     @property
     def t(self):
@@ -77,16 +89,28 @@ class World:
         while self.jumps and self.t >= self.jumps[0][0]:
             self.now += int(self.jumps.pop(0)[1] * 1e9)
 
-    def read(self, source):
+    def read(self, source, part=None):
         self.advance(self.read_cost_ns)
         if self.sensor_fail(self.t):
+            if self.lose_settings:
+                self.standby.update(("adxl", "imu"))
             raise self.sensor_error or OSError("[Errno 5] simulated I2C failure")
+        if part in self.standby:
+            return (0.0, 0.0, 0.0)
         return source(self.t)
 
     def start(self, part):
-        """Called when the firmware starts a part; raises if it is not answering now."""
+        """Called when the firmware starts a part. Raises if the part is not
+        answering now, never returns if its driver hangs, and otherwise leaves
+        the part switched on with fresh settings."""
+        if part in self.sensor_start_hang(self.t):
+            while True:                                 # like a driver waiting on a bit that never clears
+                self.advance(1_000_000)
+                if self.now >= self.end_ns:
+                    raise SimEnd
         if part in self.sensor_start_fail(self.t):
             raise START_ERRORS[part]
+        self.standby.discard(part)
 
     def deliver(self):
         while self.pending and self.pending[0][0] <= self.t:
@@ -145,7 +169,7 @@ def _stand_ins(world):
 
         @property
         def acceleration(self):
-            return world.read(world.high_g)
+            return world.read(world.high_g, "adxl")
 
     adxl.ADXL375 = ADXL375
 
@@ -182,11 +206,11 @@ def _stand_ins(world):
 
         @property
         def acceleration(self):
-            return world.read(world.imu_accel)
+            return world.read(world.imu_accel, "imu")
 
         @property
         def gyro(self):
-            return world.read(world.gyro)
+            return world.read(world.gyro, "imu")
 
     lsm3.LSM6DS3TRC = LSM6DS3TRC
 
@@ -206,6 +230,7 @@ def _stand_ins(world):
             now_connected = bool(world.connected(world.t))
             if now_connected and not self._was_connected:
                 world.connection += 1
+                world.connected_since = world.t
                 self._advertising = False
             self._was_connected = now_connected
             return now_connected
@@ -259,7 +284,10 @@ def _stand_ins(world):
             if world.write_fail(world.t):
                 raise BluetoothError("Unknown BLE error: 0x0006")
             assert world.connected(world.t), "firmware wrote while disconnected"
-            world.writes.append((world.now, world.connection, bytes(data)))
+            if world.t - world.connected_since < world.subscribe_delay:
+                world.dropped_writes += 1               # nobody is subscribed yet
+            else:
+                world.writes.append((world.now, world.connection, bytes(data)))
             world.advance(world.write_cost_ns)
 
     nordic.UARTService = UARTService

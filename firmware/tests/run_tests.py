@@ -1,7 +1,7 @@
 """Run every test against one firmware file. Needs only Python 3, not pytest.
 
-    python3 tests/run_tests.py firmware_1.0.1/code.py
-    python3 tests/run_tests.py firmware_1.1.1/code.py
+    python3 tests/run_tests.py firmware_1.0.2/code.py
+    python3 tests/run_tests.py firmware_1.1.2/code.py
 
 Tests of features that only firmware 1.1 has are reported as "not applicable"
 when the file under test is a 1.0 firmware.
@@ -16,6 +16,7 @@ ONLY_IN_1_1 = {
     "test_bench_counts_three_sensor_reads_for_one_second",
     "test_bench_is_refused_while_armed",
     "test_bench_reports_a_sensor_fault",
+    "test_arm_after_a_sensor_fault_during_bench_restarts_the_sensors",
     "test_dump_header_lists_twelve_columns",
     "test_dump_without_a_capture_is_refused",          # checks the 1.1 command list
     "test_every_row_has_twelve_fields",

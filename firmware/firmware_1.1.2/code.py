@@ -1,13 +1,22 @@
-"""DGT-1 Prototype 1, firmware 1.0.1. Copy to CIRCUITPY/code.py.
+"""DGT-1 Prototype 1, firmware 1.1.2. Copy to CIRCUITPY/code.py.
 
-Same commands, capture and CSV as 1.0. New in 1.0.1: a sensor or radio fault
-no longer stops the pod.
-- Bluetooth starts before the sensors. If a sensor does not answer, the pod
-  still advertises, STATUS replies SENSOR_ERROR with the part that did not
-  start, and ARM tries the sensors again.
+Since 1.1.1 a sensor or radio fault no longer stops the pod. 1.1.2 advertises
+before the sensors are started, restarts the sensors on ARM after any sensor
+fault, and keeps a waiting line until the phone has sent something.
+- The pod advertises before the sensors are started. If a sensor does not
+  answer, STATUS replies SENSOR_ERROR with the part that did not start, and
+  ARM tries the sensors again.
 - A sensor read or a Bluetooth call that fails in an unexpected way is
   handled instead of ending the program.
 - Anything else unexpected is printed on USB and the program restarts.
+
+New in 1.1:
+- Every row also stores the IMU's own accelerometer (three extra CSV columns
+  at the end: imu_ax_g, imu_ay_g, imu_az_g).
+- Recording runs ten seconds past the trigger instead of five.
+- The READY summary ends with rate_hz, the sample rate actually achieved.
+- INFO reports the firmware version and capture layout.
+- BENCH reports how many full sensor reads the board manages in one second.
 """
 import gc
 import math
@@ -19,24 +28,28 @@ from adafruit_adxl37x import ADXL375
 from adafruit_ble import BLERadio
 from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
 from adafruit_ble.services.nordic import UARTService
-from adafruit_lsm6ds import GyroRange, Rate
+from adafruit_lsm6ds import AccelRange, GyroRange, Rate
 from adafruit_lsm6ds.lsm6ds3trc import LSM6DS3TRC
 
+VERSION = "1.1.2"
 G = 9.80665
 PERIOD_NS = 10_000_000  # Target 100 samples/s.
 PRE = 30                 # Up to 0.30 s of history.
-WINDOW_NS = 5_000_000_000
+WINDOW_NS = 10_000_000_000  # Recording time after the trigger.
 ARM_TIMEOUT_NS = 3_600_000_000_000  # Keep elapsed microseconds within uint32.
 TRIGGER_G = 3.0
 TRIGGER_G_SQ = TRIGGER_G * TRIGGER_G
 TRIGGER_RPM = 90.0
 WARN_RAD_S = math.radians(1900)
 RPM_PER_RAD_S = 30 / math.pi
-FORMAT = "<Iffffff"  # time in us, acceleration in g, gyro in rad/s
+# time in us, ADXL375 acceleration in g, gyro in rad/s, IMU acceleration in g
+FORMAT = "<Ifffffffff"
 ROW = struct.calcsize(FORMAT)
 CAPACITY = PRE + WINDOW_NS // PERIOD_NS + 2
-VERSION = "1.0.1"
-COMMANDS = "ARM STATUS DUMP CANCEL"
+HEADER = ("t_ms,ax_g,ay_g,az_g,gx_rad_s,gy_rad_s,gz_rad_s,z_rpm,z_near_limit,"
+          "imu_ax_g,imu_ay_g,imu_az_g")
+COLUMNS = 12
+COMMANDS = "ARM STATUS DUMP CANCEL INFO BENCH"
 
 class Capture:
     def __init__(self):
@@ -53,13 +66,14 @@ class Capture:
         self.partial = self.dumped = self.confirm = False
         self.state = "ARMED"
 
-    def sample(self, now, accel, gyro):
+    def sample(self, now, accel, gyro, imu_accel):
         # Plain divisions: no generator object to allocate on every sample.
         ax = accel[0] / G
         ay = accel[1] / G
         az = accel[2] / G
         gx, gy, gz = gyro
         if self.state == "ARMED":
+            # The trigger still uses only the ADXL375 and gyro Z, as in 1.0.
             if ax*ax + ay*ay + az*az >= TRIGGER_G_SQ or abs(gz)*RPM_PER_RAD_S >= TRIGGER_RPM:
                 self.trigger_us = (now - self.start) // 1000
                 self.end = now + WINDOW_NS
@@ -69,7 +83,8 @@ class Capture:
                 self.count -= 1
         slot = (self.head + self.count) % CAPACITY
         struct.pack_into(FORMAT, self.data, ROW * slot, (now-self.start)//1000,
-                         ax, ay, az, gx, gy, gz)
+                         ax, ay, az, gx, gy, gz,
+                         imu_accel[0] / G, imu_accel[1] / G, imu_accel[2] / G)
         self.count += 1
         if self.state == "RECORDING" and (now >= self.end or self.count == CAPACITY):
             self.state = "READY"
@@ -83,17 +98,22 @@ class Capture:
         peak_g = peak_rpm = 0.0
         limited = False
         largest_gap = 0
-        previous = None
-        for t, ax, ay, az, gx, gy, gz in self.rows():
+        first = previous = None
+        for t, ax, ay, az, gx, gy, gz, bx, by, bz in self.rows():
             peak_g = max(peak_g, math.sqrt(ax*ax + ay*ay + az*az))
             peak_rpm = max(peak_rpm, abs(gz)*RPM_PER_RAD_S)
             limited |= abs(gz) >= WARN_RAD_S
-            if previous is not None:
+            if previous is None:
+                first = t
+            else:
                 largest_gap = max(largest_gap, t - previous)
             previous = t
+        rate = 0.0
+        if self.count > 1 and previous > first:
+            rate = (self.count - 1) * 1000000 / (previous - first)
         spin = "NEAR_LIMIT" if limited else "%.1f" % peak_rpm
-        return "READY samples=%d peak_g=%.2f peak_abs_rpm=%s max_gap_ms=%.1f%s" % (
-            self.count, peak_g, spin, largest_gap / 1000,
+        return "READY samples=%d peak_g=%.2f peak_abs_rpm=%s max_gap_ms=%.1f rate_hz=%.1f%s" % (
+            self.count, peak_g, spin, largest_gap / 1000, rate,
             " partial=1" if self.partial else "")
 
 def run():
@@ -114,12 +134,15 @@ def run():
     notice = None  # Unsolicited status line waiting to be sent over BLE.
     adv_error = None  # Last advertising error printed, so it is printed once.
     torn = False      # A reply was cut off mid-line; the next must start a new line.
+    listening = False  # The phone has sent something on this connection.
+    suspect = False    # A sensor read failed, so the sensors' settings cannot be trusted.
 
     def start_sensors():
         """Start both sensors. Returns True when they are ready. Otherwise
         fault names each part that did not start, and why."""
-        nonlocal high_g, imu, fault
+        nonlocal high_g, imu, fault, suspect
         high_g = imu = None
+        print("Starting sensors.")  # If this is the last line on USB, a driver hung.
         try:
             i2c = board.STEMMA_I2C()
         except Exception as error:
@@ -135,13 +158,37 @@ def run():
             new_imu = LSM6DS3TRC(i2c)
             new_imu.gyro_range = GyroRange.RANGE_2000_DPS
             new_imu.gyro_data_rate = Rate.RATE_104_HZ
+            # +/-16 g keeps the IMU accelerometer reading through slow spins. At the
+            # library default of +/-4 g it would clip near 350 RPM at this radius.
+            new_imu.accelerometer_range = AccelRange.RANGE_16G
+            new_imu.accelerometer_data_rate = Rate.RATE_104_HZ
         except Exception as error:
             problems.append("LSM6DS3TR-C did not start: %s" % error)
         if problems:
             fault = "; ".join(problems)
             return False
         high_g, imu, fault = new_high_g, new_imu, None
+        suspect = False
         return True
+
+    def advertise():
+        """Start advertising if the radio is idle. A Bluetooth error is printed
+        once, and the next call tries again."""
+        nonlocal adv_error
+        if radio.advertising:
+            return
+        try:
+            radio.start_advertising(advertisement)
+            adv_error = None
+        except Exception as error:  # Bluetooth errors are not OSErrors.
+            if str(error) != adv_error:
+                adv_error = str(error)
+                print("Advertising did not start:", adv_error)
+            try:
+                # Clears a stale "already advertising" state before the next try.
+                radio.stop_advertising()
+            except Exception:
+                pass
 
     def reply(line):
         nonlocal torn
@@ -163,15 +210,18 @@ def run():
             return False
 
     def dispatch(cmd):
-        nonlocal notice
+        nonlocal notice, suspect
         if cmd == b"ARM" and capture.state != "RECORDING":
             if capture.state == "READY" and not (capture.dumped or capture.confirm):
                 capture.confirm = True
                 reply("UNSAVED capture not dumped. Send ARM again to discard.")
                 return
-            if high_g is None and not start_sensors():
+            # After any sensor fault the sensors are started again. One that lost
+            # power comes back switched off and would read zeros for ever.
+            if (high_g is None or suspect) and not start_sensors():
                 # Still no sensors. Say why, then refuse in the usual words.
                 capture.state = "SENSOR_ERROR"
+                notice = None  # The reason is in this reply.
                 reply("SENSOR_ERROR " + fault)
                 reply("State SENSOR_ERROR. Commands: " + COMMANDS)
                 return
@@ -184,24 +234,51 @@ def run():
             reply("IDLE")
         elif cmd == b"STATUS":
             if capture.state == "READY":
-                reply(capture.summary())
+                line = capture.summary()
             elif high_g is None:
-                reply("SENSOR_ERROR " + fault)  # Names the part that did not start.
+                line = "SENSOR_ERROR " + fault  # Names the part that did not start.
             else:
-                reply(capture.state)
+                line = capture.state
+            if reply(line) and notice == line:
+                notice = None  # The waiting line would only repeat this reply.
         elif cmd == b"DUMP" and capture.state == "READY":
-            reply("t_ms,ax_g,ay_g,az_g,gx_rad_s,gy_rad_s,gz_rad_s,z_rpm,z_near_limit")
-            for t, ax, ay, az, gx, gy, gz in capture.rows():
+            reply(HEADER)
+            for t, ax, ay, az, gx, gy, gz, bx, by, bz in capture.rows():
                 flag = abs(gz) >= WARN_RAD_S
                 rpm = "" if flag else "%.2f" % (gz*RPM_PER_RAD_S)
-                if not reply("%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%s,%d" %
-                             ((t-capture.trigger_us)/1000, ax, ay, az, gx, gy, gz, rpm, flag)):
+                if not reply("%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%s,%d,%.3f,%.3f,%.3f" %
+                             ((t-capture.trigger_us)/1000, ax, ay, az, gx, gy, gz, rpm, flag,
+                              bx, by, bz)):
                     return
             capture.dumped = reply("END")
+        elif cmd == b"INFO":
+            reply("DGT-1 fw=%s target_hz=%d window_s=%d pre=%d cols=%d" % (
+                VERSION, 1000000000 // PERIOD_NS, WINDOW_NS // 1000000000, PRE, COLUMNS))
+        elif cmd == b"BENCH" and capture.state not in ("ARMED", "RECORDING"):
+            # How many full three-sensor reads fit in one second, with nothing
+            # else running. Shows how far the sample rate could be raised.
+            if high_g is None:
+                reply("SENSOR_ERROR " + fault)
+                return
+            reads = 0
+            stop = time.monotonic_ns() + 1000000000
+            try:
+                while time.monotonic_ns() < stop:
+                    high_g.acceleration
+                    imu.gyro
+                    imu.acceleration
+                    reads += 1
+                reply("BENCH reads_per_s=%d" % reads)
+            except Exception as error:  # An I2C error, or anything else a driver raises.
+                suspect = True
+                reply("SENSOR_ERROR %s" % error)
         else:
             reply("State " + capture.state + ". Commands: " + COMMANDS)
 
     print("DGT-1 firmware " + VERSION)
+    # Advertise before touching the sensors, so the pod can be found even if a
+    # sensor driver never returns.
+    advertise()
     if start_sensors():
         print("DGT-1 ready. Connect in Bluefruit Connect > UART.")
     else:
@@ -222,8 +299,10 @@ def run():
                 try:
                     accel = high_g.acceleration
                     gyro = imu.gyro
+                    imu_accel = imu.acceleration
                 except Exception as error:  # An I2C error, or anything else a driver raises.
                     print(error)
+                    suspect = True
                     if capture.state == "RECORDING":
                         # Keep what was recorded so far instead of losing it.
                         capture.partial = True
@@ -232,7 +311,7 @@ def run():
                         capture.state = "SENSOR_ERROR"
                         notice = "SENSOR_ERROR %s" % error
                 else:
-                    capture.sample(now, accel, gyro)
+                    capture.sample(now, accel, gyro, imu_accel)
                 if capture.state == "READY":
                     notice = capture.summary()
         # Keep BLE traffic and formatting out of the recording loop.
@@ -241,12 +320,16 @@ def run():
             continue
         if radio.connected:
             connected = True
-            if notice and reply(notice):
+            # A line written before the phone has subscribed is dropped without
+            # an error, so a waiting line is held until the phone sends something.
+            if notice and listening and reply(notice):
                 notice = None
             try:
                 incoming = uart.read(min(64, uart.in_waiting)) if uart.in_waiting else None
             except Exception:  # Bluetooth errors are not OSErrors.
                 incoming = None
+            if incoming:
+                listening = True
             for char in incoming or b"":
                 if char in (10, 13):
                     if command and not discard:
@@ -260,20 +343,8 @@ def run():
         else:
             if connected:
                 command = bytearray()
-                discard = connected = torn = False
-            if not radio.advertising:
-                try:
-                    radio.start_advertising(advertisement)
-                    adv_error = None
-                except Exception as error:  # Bluetooth errors are not OSErrors.
-                    if str(error) != adv_error:
-                        adv_error = str(error)
-                        print("Advertising did not start:", adv_error)
-                    try:
-                        # Clears a stale "already advertising" state before the next try.
-                        radio.stop_advertising()
-                    except Exception:
-                        pass
+                discard = connected = torn = listening = False
+            advertise()
         time.sleep(0.001 if capture.state == "ARMED" else 0.02)
 
 
