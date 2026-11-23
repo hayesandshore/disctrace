@@ -27,6 +27,15 @@ class Gatt {
     this.device.dispatchEvent(new Event("gattserverdisconnected"));
   }
 
+  async getPrimaryServices() {
+    if (!this.connected) {
+      throw new DOMException("GATT Server is disconnected. Cannot retrieve services.", "NetworkError");
+    }
+    const uuids = [...(this.pod.uart ? [SERVICE] : []), ...this.pod.otherServices];
+    if (!uuids.length) throw new DOMException("No Services found in device.", "NotFoundError");
+    return uuids.map((uuid) => ({ uuid }));
+  }
+
   async getPrimaryService(uuid) {
     if (!this.connected) {
       throw new DOMException("GATT Server is disconnected. Cannot retrieve services.", "NetworkError");
@@ -59,6 +68,7 @@ class TxCharacteristic extends EventTarget {
     super();
     this.pod = pod;
     this.uuid = TX;
+    this.properties = { notify: true };
     this.notifying = false;
     this.value = null;
   }
@@ -77,6 +87,8 @@ export class FakePod {
     this.uart = true;          // false: the pod's program is not running, so no UART service
     this.notifiable = true;    // false: the pod refuses the subscription
     this.answers = true;       // false: commands arrive but nothing comes back
+    this.otherServices = [];   // UUIDs of other services the device offers
+    this.requests = [];        // what the page asked the browser's device list for
     this.commands = [];        // every complete command the pod received
     this.inbox = "";
     this.device = new Device(this);
@@ -93,7 +105,8 @@ export class FakePod {
   /** Makes this pod the one the browser's Bluetooth chooser returns. */
   install() {
     const bluetooth = {
-      requestDevice: async () => {
+      requestDevice: async (options) => {
+        this.requests.push(options);
         if (this.chooser === "cancelled") {
           throw new DOMException("User cancelled the requestDevice() chooser.", "NotFoundError");
         }

@@ -39,7 +39,11 @@ There is no build step. To update the site, upload the changed files again.
 6. Repeat with the pod carried out of range after arming. The page should reconnect on its own when the pod is back, without arming again.
 7. Reload the page with Bluetooth off. The saved throws should still open.
 
-If something goes wrong, open **Bluetooth log**, press **Copy log**, and send the text along with what you saw.
+If something goes wrong, the **Diagnostics console** on the right shows every step, with a suggested next step in blue. Press **Copy all** or **Download log** and send the text along with what you saw.
+
+- **Run checks** repeats the browser and Bluetooth checks.
+- **Scan for all Bluetooth devices** lists every device nearby, not only DGT-1. An empty list means this browser or computer is not scanning. Other devices but no DGT-1 means the pod is not broadcasting.
+- The box at the bottom sends any command to a connected pod and shows the raw reply.
 
 ## The spin estimate
 
@@ -56,6 +60,7 @@ Above about 317 RPM the gyro cannot read spin, so the page estimates it from the
 | `js/transport-sim.js` | The simulated pod. |
 | `js/metrics.js` | Spin estimate, distance calibration, capture numbers. |
 | `js/view.js` | Which message and buttons the pod panel shows in each state. |
+| `js/diagnostics.js` | The diagnostics console's checks and wording. |
 | `js/chart.js`, `js/store.js`, `js/app.js` | Charts, saved throws (IndexedDB), page wiring. |
 | `tests/` | Tests for the logic above. Run `npm test` (needs Node 22 or later, nothing to install). |
 | `firmware/` | The pod's CircuitPython firmware (1.0.2 and 1.1.2), its simulator tests and install notes. Start with `firmware/CHANGES.md`. |

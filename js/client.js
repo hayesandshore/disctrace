@@ -209,6 +209,14 @@ export class PodClient {
     return result;
   }
 
+  /** Writes a line typed by hand in the diagnostics console. It does not
+   *  wait for an answer: whatever comes back is handled like any other line. */
+  async send(text) {
+    if (this.state.link !== "connected") throw new Error("Not connected to the pod.");
+    this.log("tx", text);
+    await this.transport.write(`${text}\n`);
+  }
+
   refresh() {
     return this.request("STATUS",
       (kind) => kind.type === "state" || kind.type === "ready" || kind.type === "notice",

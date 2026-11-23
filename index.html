@@ -49,6 +49,25 @@
     </div>
 
     <main id="throw" class="throw" tabindex="-1"></main>
+
+    <aside class="console" id="console" aria-label="Diagnostics console">
+      <h2>Diagnostics console</h2>
+      <p class="console-status" id="console-status">Starting.</p>
+      <div class="console-tools">
+        <button type="button" id="console-checks" class="quiet">Run checks</button>
+        <button type="button" id="console-scan" class="quiet">Scan for all Bluetooth devices</button>
+        <button type="button" id="console-copy" class="quiet">Copy all</button>
+        <button type="button" id="console-save" class="quiet">Download log</button>
+        <button type="button" id="console-clear" class="quiet">Clear</button>
+        <label class="console-raw"><input type="checkbox" id="console-raw" checked> Show every Bluetooth packet</label>
+      </div>
+      <div id="console-log" class="console-log" role="log" aria-live="off" tabindex="0"></div>
+      <form id="console-form" class="console-form">
+        <input id="console-input" type="text" autocomplete="off" spellcheck="false"
+          aria-label="Command to send to the pod" placeholder="Type STATUS, INFO, ARM, CANCEL or DUMP, then Enter">
+        <button type="submit" class="quiet">Send</button>
+      </form>
+    </aside>
   </div>
 
   <noscript>This page needs JavaScript to talk to the pod.</noscript>
