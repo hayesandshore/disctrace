@@ -8,6 +8,17 @@ const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 
+// A request the device never answers. As in Chrome, it only ends, with an
+// error, once the link is hung up.
+function unanswered(device) {
+  return new Promise((resolve, reject) => {
+    device.addEventListener("gattserverdisconnected", () => {
+      reject(new DOMException("GATT Server is disconnected. Cannot perform GATT operations. "
+        + "(Re)connect first with `device.gatt.connect`.", "NetworkError"));
+    }, { once: true });
+  });
+}
+
 class Gatt {
   constructor(pod, device) {
     this.pod = pod;
@@ -31,6 +42,7 @@ class Gatt {
     if (!this.connected) {
       throw new DOMException("GATT Server is disconnected. Cannot retrieve services.", "NetworkError");
     }
+    if (!this.pod.listable) return unanswered(this.device);
     const uuids = [...(this.pod.uart ? [SERVICE] : []), ...this.pod.otherServices];
     if (!uuids.length) throw new DOMException("No Services found in device.", "NotFoundError");
     return uuids.map((uuid) => ({ uuid }));
@@ -75,6 +87,7 @@ class TxCharacteristic extends EventTarget {
 
   async startNotifications() {
     if (!this.pod.notifiable) throw new DOMException("GATT operation not permitted.", "NotSupportedError");
+    if (!this.pod.confirms) return unanswered(this.pod.device);
     this.notifying = true;
     return this;
   }
@@ -86,6 +99,8 @@ export class FakePod {
     this.inRange = true;       // false: the radio link cannot be opened
     this.uart = true;          // false: the pod's program is not running, so no UART service
     this.notifiable = true;    // false: the pod refuses the subscription
+    this.confirms = true;      // false: the subscription request is never answered
+    this.listable = true;      // false: asking which services the device offers is never answered
     this.answers = true;       // false: commands arrive but nothing comes back
     this.otherServices = [];   // UUIDs of other services the device offers
     this.requests = [];        // what the page asked the browser's device list for

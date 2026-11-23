@@ -15,6 +15,16 @@ async function step(problem, work) {
   }
 }
 
+// Stops waiting for a request the browser never finishes. Without a limit the
+// page stays "connecting" for ever while it holds the pod's only connection.
+function answered(request, ms) {
+  let timer;
+  const silence = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer after ${ms / 1000} seconds.`)), ms);
+  });
+  return Promise.race([request, silence]).finally(() => clearTimeout(timer));
+}
+
 // The properties a characteristic says it has, for the console.
 function properties(characteristic) {
   const names = ["read", "write", "writeWithoutResponse", "notify", "indicate"];
@@ -22,7 +32,10 @@ function properties(characteristic) {
 }
 
 export class BleTransport {
-  constructor() {
+  constructor({ subscribeTimeoutMs = 15000, servicesTimeoutMs = 3000 } = {}) {
+    // How long the pod gets to answer before the attempt is given up.
+    this.subscribeTimeoutMs = subscribeTimeoutMs;
+    this.servicesTimeoutMs = servicesTimeoutMs;
     this.kind = "ble";
     this.name = "DGT-1";
     this.device = null;
@@ -106,8 +119,11 @@ export class BleTransport {
       this.trace("uart-found", { rx: properties(this.rx), tx: properties(this.tx) });
       this.decoder = new TextDecoder();
       this.tx.addEventListener("characteristicvaluechanged", this.handleValue);
+      // Said before the answer is known: if the pod stays silent, this is the
+      // console's last line while the page waits.
+      this.trace("subscribing");
       await step(`Connected to ${this.name}, but could not subscribe to its replies`,
-        () => this.tx.startNotifications());
+        () => answered(this.tx.startNotifications(), this.subscribeTimeoutMs));
       this.trace("subscribed");
     } catch (error) {
       this.trace("connect-failed", { message: error.message });
@@ -127,7 +143,8 @@ export class BleTransport {
 
   async traceServices(server) {
     try {
-      const services = await server.getPrimaryServices();
+      // Limited too: a device that has gone silent must not delay the hang-up.
+      const services = await answered(server.getPrimaryServices(), this.servicesTimeoutMs);
       this.trace("services", { uuids: services.map((service) => service.uuid) });
     } catch (error) {
       this.trace("services", { uuids: [], message: error.message });

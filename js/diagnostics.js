@@ -1,7 +1,7 @@
 // Words and checks for the diagnostics console. Pure: no DOM and no Bluetooth
 // calls, so every line the console can print is testable.
 
-export const SITE_VERSION = "2026-11-23 console";
+export const SITE_VERSION = "2026-11-23 subscribe timeout";
 
 const NUS = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const CIRCUITPYTHON_SERVICES = [
@@ -88,6 +88,8 @@ export function describeTrace(event) {
         kind: "ble",
         text: `UART service found. Write characteristic: ${detail.rx}. Reply characteristic: ${detail.tx}.`,
       }];
+    case "subscribing":
+      return [{ kind: "ble", text: "Subscribing to the pod's replies." }];
     case "subscribed":
       return [{ kind: "ble", text: "Subscribed to the pod's replies. The link is ready." }];
     case "services": {
@@ -140,6 +142,11 @@ const HINTS = [
     + "broadcasting: check its power and its USB console."],
   [/could not find its UART service/, "The device answered, but the pod's program is not running on it. Look at the "
     + "USB console for an error, and check that code.py is at the top of the CIRCUITPY drive."],
+  // Before the refusal below: both say "could not subscribe", and the first match wins.
+  [/could not subscribe to its replies: no answer/, "The pod never answered the request to send its replies, so the "
+    + "page hung up. On this phone or computer: accept a pairing request if one is waiting, forget DGT-1 in the "
+    + "Bluetooth settings if it is listed there, close any other Bluetooth app, and turn Bluetooth off and on. Then "
+    + "reset the pod and try again; if it repeats, send this log."],
   [/could not subscribe/, "The link opened but the pod refused the reply subscription. Disconnect, reset the pod and "
     + "try again; if it repeats, send this log."],
   [/Could not connect to/, "The pod was seen but the link did not open. Move closer, and make sure another phone, "

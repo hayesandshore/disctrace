@@ -104,6 +104,12 @@ test("a failed step is an error line with the reason", () => {
   assert.match(line.text, /Connection attempt failed/);
 });
 
+test("the subscription request is announced in words before its answer is known", () => {
+  const [line] = describeTrace({ step: "subscribing" });
+  assert.match(line.text, /^Subscribing to the pod's replies/);
+  assert.doesNotMatch(line.text, /[{}]/);   // not the raw form an unknown step is printed in
+});
+
 test("an unknown step is still printed rather than dropped", () => {
   assert.match(describeTrace({ step: "something-new", detail: 5 })[0].text, /something-new/);
 });
@@ -115,6 +121,12 @@ test("each known failure gets a next step, and unknown text gets none", () => {
   assert.match(hintFor("Could not connect to DGT-1: Connection attempt failed."), /another/i);
   assert.match(hintFor("The pod did not answer STATUS."), /USB/);
   assert.equal(hintFor("Connected to DGT-1."), null);
+});
+
+test("a refused subscription and an unanswered one get different next steps", () => {
+  const stage = "Connected to DGT-1, but could not subscribe to its replies";
+  assert.match(hintFor(`${stage}: GATT operation not permitted.`), /refused/);
+  assert.match(hintFor(`${stage}: no answer after 15 seconds.`), /never answered/);
 });
 
 // State changes ----------------------------------------------------------------------------------

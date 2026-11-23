@@ -2,12 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { BleTransport } from "../js/transport-ble.js";
+import { hintFor } from "../js/diagnostics.js";
 import { FakePod } from "./fake-bluetooth.js";
 
 // Connects a fresh transport to the pod and counts the link losses it reports.
-function open(pod) {
+function open(pod, options) {
   pod.install();
-  const transport = new BleTransport();
+  const transport = new BleTransport(options);
   const seen = { text: "", lost: 0, trace: [] };
   transport.onTrace = (event) => seen.trace.push(event);
   transport.onData = (piece) => {
@@ -27,6 +28,18 @@ async function failure(promise) {
   }
   return assert.fail("expected the connection attempt to fail");
 }
+
+// Fails a test that is still waiting, instead of letting it wait for ever.
+function within(ms, promise) {
+  let timer;
+  const late = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+// Short limits, so a pod that never answers is given up on within a test.
+const QUICK = { subscribeTimeoutMs: 20, servicesTimeoutMs: 20 };
 
 // The healthy path -----------------------------------------------------------------
 test("a healthy pod connects and a long reply arrives as one piece of text", async () => {
@@ -97,6 +110,41 @@ test("a failed subscription also hangs up again", async () => {
   assert.equal(pod.device.gatt.connected, false);
 });
 
+// Never waiting for ever -----------------------------------------------------------------
+test("a subscription the pod never answers is given up on and reported as that", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  const error = await within(1000, failure(open(pod, QUICK).transport.connect()));
+  assert.match(error.message, /could not subscribe/);
+  assert.match(error.message, /no answer after 0\.02 seconds/);   // the limit that ran out, 20 ms
+});
+
+test("an unanswered subscription gets the console's advice for silence, not for a refusal", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  const error = await within(1000, failure(open(pod, QUICK).transport.connect()));
+  assert.match(hintFor(error.message), /never answered/);
+});
+
+test("an unanswered subscription hangs up again, and is not reported as a lost link", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  const { transport, seen } = open(pod, QUICK);
+  await within(1000, failure(transport.connect()));
+  assert.equal(pod.device.gatt.connected, false);   // or the pod stops advertising and nothing can find it
+  assert.equal(transport.connected, false);
+  assert.equal(seen.lost, 0);
+});
+
+test("a device that will not list its services either is still hung up on", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  pod.listable = false;
+  const { transport } = open(pod, QUICK);
+  await within(1000, failure(transport.connect()));
+  assert.equal(pod.device.gatt.connected, false);
+});
+
 // Reporting a lost link only when one was up ------------------------------------------------
 test("hanging up a failed attempt is not reported as a lost link", async () => {
   const pod = new FakePod();
@@ -142,10 +190,18 @@ test("a healthy connection is traced step by step, in order", async () => {
   const { transport, seen } = open(new FakePod());
   await transport.connect();
   assert.deepEqual(steps(seen),
-    ["chooser-open", "chooser-picked", "gatt-connecting", "gatt-connected", "uart-found", "subscribed"]);
+    ["chooser-open", "chooser-picked", "gatt-connecting", "gatt-connected", "uart-found", "subscribing", "subscribed"]);
   const picked = seen.trace.find((event) => event.step === "chooser-picked");
   assert.equal(picked.name, "DGT-1");
   assert.equal(picked.id, "fake-dgt-1");
+});
+
+test("an unanswered subscription is traced from the request to the hang-up", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  const { transport, seen } = open(pod, QUICK);
+  await within(1000, failure(transport.connect()));
+  assert.deepEqual(steps(seen).slice(-5), ["uart-found", "subscribing", "connect-failed", "services", "hung-up"]);
 });
 
 test("a closed device list is traced with the browser's reason", async () => {
