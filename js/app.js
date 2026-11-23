@@ -10,6 +10,7 @@ import { parseCapturedText } from "./protocol.js";
 import { analyse, DEFAULT_RADIUS_MM } from "./metrics.js";
 import { lineChart, chartGroup } from "./chart.js";
 import { podView } from "./view.js";
+import { ConsoleLog, SITE_VERSION, describeTrace, environmentLines, hintFor, stateChanges } from "./diagnostics.js";
 
 const params = new URLSearchParams(location.search);
 const SIM_SPEED = Number(params.get("simspeed")) || 3;   // the simulated pod runs a little fast
@@ -62,6 +63,187 @@ function saveRadius(value) {
   try {
     localStorage.setItem("disctrace.radiusMm", String(value));
   } catch { /* storage unavailable: the setting lasts for this visit only */ }
+}
+
+// Diagnostics console ---------------------------------------------------------------
+// Everything that happens is written here with a time stamp: the browser
+// checks, each Bluetooth step, every packet in both directions, each change of
+// state, and a next step when a failure is one the console knows.
+const diag = new ConsoleLog();
+const KEEP_KEY = "disctrace.console";
+let earlierLines = [];      // the end of the previous visit's log, already formatted
+let keepTimer = null;
+let waitingRows = [];       // lines not on screen yet
+let drawTimer = null;
+
+// A download sends thousands of packets. Drawing them in batches keeps the
+// page from re-measuring itself once per packet while the pod is talking.
+function showLine(text, classes) {
+  waitingRows.push(el("div", { class: classes, text }));
+  if (drawTimer) return;
+  drawTimer = setTimeout(() => {
+    drawTimer = null;
+    const box = $("#console-log");
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.append(...waitingRows);
+    waitingRows = [];
+    while (box.children.length > diag.limit) box.firstChild.remove();
+    if (atEnd) box.scrollTop = box.scrollHeight;
+  }, 50);
+}
+
+function say(kind, text) {
+  if (diag.repeats(kind, text)) return;
+  showLine(ConsoleLog.format(diag.add(kind, text)), `k-${kind}`);
+  clearTimeout(keepTimer);
+  keepTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(KEEP_KEY, JSON.stringify(diag.lines.slice(-600).map(ConsoleLog.format)));
+    } catch { /* storage unavailable: the log lasts for this visit only */ }
+  }, 500);
+  const hint = kind === "hint" || kind === "raw" ? null : hintFor(text);
+  if (hint) say("hint", hint);
+}
+
+function consoleText() {
+  const earlier = earlierLines.length
+    ? ["---- kept from the previous visit ----", ...earlierLines, "---- this visit ----"] : [];
+  const [header, ...lines] = diag.text().split("\n");
+  return [header, ...earlier, ...lines].join("\n");
+}
+
+function traced(event) {
+  if ((event.step === "rx" || event.step === "tx") && !$("#console-raw").checked) return;
+  for (const line of describeTrace(event)) say(line.kind, line.text);
+}
+
+function newBle() {
+  const transport = new BleTransport();
+  transport.onTrace = traced;
+  return transport;
+}
+
+async function runChecks() {
+  const hasBluetooth = BleTransport.supported;
+  let adapter = null;
+  if (hasBluetooth && navigator.bluetooth.getAvailability) {
+    try {
+      adapter = await navigator.bluetooth.getAvailability();
+    } catch (error) {
+      adapter = `${error.name}: ${error.message}`;
+    }
+  }
+  const facts = {
+    version: SITE_VERSION, url: location.href, userAgent: navigator.userAgent,
+    secure: window.isSecureContext, hasBluetooth, adapter,
+  };
+  for (const line of environmentLines(facts)) say(line.kind, line.text);
+}
+
+function renderConsoleStatus() {
+  const { state } = client;
+  $("#console-status").textContent = `link: ${state.link} | pod: ${state.pod} | firmware: ${state.firmware ?? "unknown"}`
+    + ` | transport: ${ui.transport?.kind ?? "none"} | site: ${SITE_VERSION}`;
+}
+
+function startConsole() {
+  try {
+    earlierLines = JSON.parse(localStorage.getItem(KEEP_KEY) ?? "[]");
+  } catch {
+    earlierLines = [];
+  }
+  if (earlierLines.length) {
+    showLine("---- kept from the previous visit ----", "earlier");
+    for (const line of earlierLines) showLine(line, "earlier");
+    showLine("---- this visit ----", "earlier");
+  }
+  say("note", "Console started. Everything this page does with the pod is written here.");
+  window.addEventListener("error", (event) => {
+    say("error", `Page error: ${event.message} (${String(event.filename).split("/").pop()}:${event.lineno})`);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    say("error", `Page error: ${event.reason?.message ?? event.reason}`);
+  });
+  document.addEventListener("visibilitychange", () => {
+    say("note", document.hidden ? "This page went to the background." : "This page is in front again.");
+  });
+  if (BleTransport.supported && navigator.bluetooth.addEventListener) {
+    navigator.bluetooth.addEventListener("availabilitychanged", (event) => {
+      say(event.value ? "check" : "error", `Bluetooth adapter is now ${event.value ? "on" : "off"}.`);
+    });
+  }
+
+  $("#console-checks").addEventListener("click", () => runChecks());
+  $("#console-scan").addEventListener("click", () => scanAll());
+  $("#console-copy").addEventListener("click", async (event) => {
+    try {
+      await navigator.clipboard.writeText(consoleText());
+      event.target.textContent = "Copied";
+    } catch {
+      event.target.textContent = "Copy not allowed here";
+    }
+    setTimeout(() => {
+      event.target.textContent = "Copy all";
+    }, 1500);
+  });
+  $("#console-save").addEventListener("click", () => {
+    const url = URL.createObjectURL(new Blob([`${consoleText()}\n`], { type: "text/plain" }));
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const link = el("a", { href: url, download: `disctrace-console-${stamp}.txt` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  $("#console-clear").addEventListener("click", () => {
+    diag.clear();
+    earlierLines = [];
+    waitingRows = [];
+    $("#console-log").replaceChildren();
+    try {
+      localStorage.removeItem(KEEP_KEY);
+    } catch { /* nothing was stored */ }
+    say("note", "Console cleared.");
+  });
+  $("#console-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = $("#console-input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    try {
+      await client.send(text);
+    } catch (error) {
+      say("error", `Could not send "${text}": ${error.message}`);
+    }
+  });
+  runChecks().catch((error) => say("error", `Checks failed: ${error.message}`));
+}
+
+/** Shows every Bluetooth device nearby, then connects to the one picked. Tells
+ *  apart a pod that is not broadcasting from a browser that is not scanning. */
+async function scanAll() {
+  if (!BleTransport.supported) {
+    say("error", "This browser has no Web Bluetooth, so it cannot scan.");
+    return;
+  }
+  if (client.state.link !== "disconnected") {
+    say("note", "Disconnect first, then scan.");
+    return;
+  }
+  const transport = newBle();
+  ui.transport = transport;
+  ui.confirmDiscard = false;
+  ui.failure = null;
+  await run(async () => {
+    try {
+      await transport.choose({ all: true });
+    } catch (error) {
+      say("note", error.message);
+      throw error;
+    }
+    await client.connect(transport);
+  });
 }
 
 // Pod panel -----------------------------------------------------------------------
@@ -139,7 +321,7 @@ function simulate(kind) {
 }
 
 const ACTIONS = {
-  "connect-ble": () => connect(new BleTransport()),
+  "connect-ble": () => connect(newBle()),
   "connect-sim": () => connect(new SimPod({ firmware: ui.simFirmware, speed: SIM_SPEED })),
   arm: () => arm(false),
   cancel: () => run(() => client.cancel()),
@@ -495,15 +677,20 @@ function dataTable(record) {
 }
 
 // Start ------------------------------------------------------------------------------------
+let lastState = { ...client.state };
 client.on("change", () => {
   if (client.state.pod !== "READY") {
     ui.confirmDiscard = false;
     ui.failure = null;
   }
+  for (const change of stateChanges(lastState, client.state)) say("state", change);
+  lastState = { ...client.state };
+  renderConsoleStatus();
   renderPod();
   renderTools();
 });
 client.on("log", appendLog);
+client.on("log", ({ dir, text }) => say({ tx: "send", rx: "recv", info: "note" }[dir], text));
 
 $("#link-disconnect").addEventListener("click", () => client.disconnect());
 $("#log-copy").addEventListener("click", async (event) => {
@@ -525,7 +712,12 @@ $("#import-file").addEventListener("change", async (event) => {
 });
 $("#import-go").addEventListener("click", () => importText($("#import-text").value));
 
+startConsole();       // first, so it can report anything that goes wrong below
+renderConsoleStatus();
 await store.open();
+say("check", store.persistent
+  ? "Saved throws: kept in this browser between visits."
+  : "Saved throws: this browser is not keeping them between visits.");
 await loadHistory();
 renderPod();
 renderTools();

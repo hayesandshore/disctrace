@@ -8,7 +8,8 @@ import { FakePod } from "./fake-bluetooth.js";
 function open(pod) {
   pod.install();
   const transport = new BleTransport();
-  const seen = { text: "", lost: 0 };
+  const seen = { text: "", lost: 0, trace: [] };
+  transport.onTrace = (event) => seen.trace.push(event);
   transport.onData = (piece) => {
     seen.text += piece;
   };
@@ -132,4 +133,98 @@ test("a pod that drops out is reported once and can be connected again", async (
   await transport.connect();    // the reconnect loop calls connect() on the same transport
   await transport.write("STATUS\n");
   assert.equal(seen.text, "IDLE\r\n");
+});
+
+// Telling the console what happened -----------------------------------------------------------
+const steps = (seen) => seen.trace.map((event) => event.step).filter((step) => step !== "rx" && step !== "tx");
+
+test("a healthy connection is traced step by step, in order", async () => {
+  const { transport, seen } = open(new FakePod());
+  await transport.connect();
+  assert.deepEqual(steps(seen),
+    ["chooser-open", "chooser-picked", "gatt-connecting", "gatt-connected", "uart-found", "subscribed"]);
+  const picked = seen.trace.find((event) => event.step === "chooser-picked");
+  assert.equal(picked.name, "DGT-1");
+  assert.equal(picked.id, "fake-dgt-1");
+});
+
+test("a closed device list is traced with the browser's reason", async () => {
+  const pod = new FakePod();
+  pod.chooser = "cancelled";
+  const { transport, seen } = open(pod);
+  await failure(transport.connect());
+  const failed = seen.trace.find((event) => event.step === "chooser-failed");
+  assert.equal(failed.name, "NotFoundError");
+  assert.match(failed.message, /cancelled/);
+});
+
+test("a failed connection traces the failure, what the device offers instead, and the hang-up", async () => {
+  const pod = new FakePod();
+  pod.uart = false;
+  pod.otherServices = ["0000febb-0000-1000-8000-00805f9b34fb"];
+  const { transport, seen } = open(pod);
+  await failure(transport.connect());
+  assert.deepEqual(steps(seen).slice(-3), ["connect-failed", "services", "hung-up"]);
+  assert.deepEqual(seen.trace.find((event) => event.step === "services").uuids,
+    ["0000febb-0000-1000-8000-00805f9b34fb"]);
+});
+
+test("every packet from the pod is traced as raw bytes", async () => {
+  const { transport, seen } = open(new FakePod());
+  await transport.connect();
+  await transport.write("HELLO\n");
+  const packets = seen.trace.filter((event) => event.step === "rx");
+  assert.equal(packets.length, 3);                      // 47 bytes in pieces of at most 20
+  const joined = packets.map((event) => new TextDecoder().decode(event.bytes)).join("");
+  assert.equal(joined, "State IDLE. Commands: ARM STATUS DUMP CANCEL\r\n");
+});
+
+test("every write to the pod is traced", async () => {
+  const { transport, seen } = open(new FakePod());
+  await transport.connect();
+  await transport.write("STATUS\n");
+  const sent = seen.trace.find((event) => event.step === "tx");
+  assert.equal(sent.text, "STATUS\n");
+  assert.equal(sent.length, 7);
+  assert.equal(sent.withResponse, false);
+});
+
+test("a pod that drops out is traced as a lost link", async () => {
+  const pod = new FakePod();
+  const { transport, seen } = open(pod);
+  await transport.connect();
+  pod.drop();
+  assert.equal(steps(seen).at(-1), "link-lost");
+});
+
+test("scanning for all devices asks the browser for every device and can still reach the UART service", async () => {
+  const pod = new FakePod();
+  const { transport, seen } = open(pod);
+  await transport.choose({ all: true });
+  const [options] = pod.requests;
+  assert.equal(options.acceptAllDevices, true);
+  assert.equal(options.filters, undefined);             // the browser rejects filters together with acceptAllDevices
+  assert.ok(options.optionalServices.includes("6e400001-b5a3-f393-e0a9-e50e24dcca9e"));
+  assert.equal(seen.trace[0].all, true);
+  await transport.connect();                            // the picked device is used without asking again
+  assert.equal(pod.requests.length, 1);
+  assert.equal(transport.connected, true);
+});
+
+test("the normal device list is still limited to the pod", async () => {
+  const pod = new FakePod();
+  await open(pod).transport.connect();
+  const [options] = pod.requests;
+  assert.equal(options.acceptAllDevices, undefined);
+  assert.deepEqual(options.optionalServices, ["6e400001-b5a3-f393-e0a9-e50e24dcca9e"]);
+  assert.equal(options.filters.length, 2);
+});
+
+test("a console that throws cannot break the link", async () => {
+  const { transport } = open(new FakePod());
+  transport.onTrace = () => {
+    throw new Error("console broke");
+  };
+  await transport.connect();
+  assert.equal(transport.connected, true);
 });

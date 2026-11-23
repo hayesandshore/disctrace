@@ -380,6 +380,28 @@ test("a reconnect that keeps failing is written to the log once, not on every at
   assert.equal(notes.filter((text) => text === "The simulated pod is out of range.").length, 1);
 });
 
+// Commands typed by hand ---------------------------------------------------------------------
+test("a typed command is written to the pod and both directions are logged", async () => {
+  const { sim, client } = await setup();
+  const log = [];
+  client.on("log", (entry) => log.push(`${entry.dir} ${entry.text}`));
+  await client.send("hello");
+  await until(() => log.some((line) => line.startsWith("rx State IDLE")), "the pod's reply");
+  assert.equal(sim.received.at(-1), "HELLO");
+  assert.equal(log[0], "tx hello");
+});
+
+test("a typed command that changes the pod is reflected in the state", async () => {
+  const { client } = await setup();
+  await client.send("ARM");
+  await until(() => client.state.pod === "ARMED", "ARMED");
+});
+
+test("a typed command is refused when nothing is connected", async () => {
+  const client = new PodClient();
+  await assert.rejects(client.send("STATUS"), /not connected/i);
+});
+
 // Pushed notices and tools ---------------------------------------------------------------
 test("an armed-timeout notice returns the pod to IDLE and is kept for display", async () => {
   const { sim, client } = await setup();
