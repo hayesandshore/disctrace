@@ -219,3 +219,100 @@ test("an old failure can be printed again once it has scrolled well past", () =>
   for (let n = 0; n < 12; n += 1) log.add("send", "STATUS");
   assert.equal(log.repeats("error", "The Bluetooth link dropped."), false);
 });
+
+// A page served by the pod over Wi-Fi ------------------------------------------------------------
+const servedByPod = {
+  link: "wifi", version: "test", url: "http://192.168.4.1/", origin: "http://192.168.4.1",
+  userAgent: "Mobile Safari (iPhone)", secure: false, hasBluetooth: false, adapter: null,
+};
+
+test("on the pod's own page nothing about Bluetooth or https is called a problem", () => {
+  const lines = environmentLines(servedByPod);
+  assert.ok(lines.every((line) => line.kind === "check"));
+  assert.match(text(lines), /Mobile Safari/);
+  assert.match(text(lines), /served by the pod.*http:\/\/192\.168\.4\.1/i);
+  assert.doesNotMatch(text(lines), /no Web Bluetooth|https address/);
+});
+
+test("asking the pod who it is, and its answer, are said in words", () => {
+  const [asking] = describeTrace({ step: "wifi-connecting", url: "http://192.168.4.1/api/hello" });
+  assert.match(asking.text, /http:\/\/192\.168\.4\.1\/api\/hello/);
+  const [answer] = describeTrace({ step: "wifi-connected", ms: 42, hello: "DGT-1 fw=2.0.0 target_hz=100" });
+  assert.match(answer.text, /42 ms/);
+  assert.match(answer.text, /DGT-1 fw=2\.0\.0/);
+  for (const line of [asking, answer]) assert.doesNotMatch(line.text, /[{}]/);   // not the raw form an unknown step gets
+});
+
+test("a lost Wi-Fi link is an error with its reason, and a lost Bluetooth link reads as before", () => {
+  const [wifi] = describeTrace({ step: "link-lost", message: "no answer for 15 seconds." });
+  assert.equal(wifi.kind, "error");
+  assert.match(wifi.text, /no answer for 15 seconds/);
+  assert.doesNotMatch(wifi.text, /Bluetooth/);
+  assert.equal(describeTrace({ step: "link-lost" })[0].text, "The Bluetooth link dropped.");
+});
+
+test("a command sent over Wi-Fi is shown without Bluetooth's write mode", () => {
+  const [line] = describeTrace({ step: "tx", text: "STATUS\n", length: 7 });
+  assert.ok(line.text.includes("STATUS\\n"));
+  assert.match(line.text, /7 bytes/);
+  assert.doesNotMatch(line.text, /response/);
+});
+
+test("the Wi-Fi failures get next steps about the network, not about Bluetooth", () => {
+  const away = hintFor("Could not reach the pod at http://192.168.4.1: Failed to fetch");
+  assert.match(away, /Wi-Fi network/);
+  assert.match(away, /DGT-1/);
+  const other = hintFor("Something at http://192.168.4.1 answered, but not like a DGT-1 pod.");
+  assert.match(other, /different network/);
+  for (const hint of [away, other]) assert.doesNotMatch(hint, /Bluetooth/);
+});
+
+test("the link's own lines are labelled with the link in use", () => {
+  const asking = { step: "wifi-connecting", url: "http://192.168.4.1/api/hello" };
+  assert.equal(describeTrace(asking, "wifi")[0].kind, "wifi");
+  assert.equal(describeTrace({ step: "disconnect-requested" }, "wifi")[0].kind, "wifi");
+  assert.equal(describeTrace({ step: "disconnect-requested" })[0].kind, "ble");                  // Bluetooth, as before
+  assert.equal(describeTrace({ step: "link-lost", message: "x" }, "wifi")[0].kind, "error");     // a failure stays a failure
+  assert.equal(describeTrace({ step: "tx", text: "STATUS\n", length: 7 }, "wifi")[0].kind, "raw");
+});
+
+// A pod on a USB cable ------------------------------------------------------------------------------
+test("the checks say whether this browser can reach a pod on a USB cable", () => {
+  assert.match(text(environmentLines({ ...healthy, hasSerial: true })), /USB serial.*: yes/);
+  const without = environmentLines({ ...healthy, hasSerial: false });
+  assert.match(text(without), /USB serial.*: no/);
+  assert.ok(without.every((line) => line.kind === "check"));       // a backup that is missing is not a fault
+});
+
+test("each USB step is said in words", () => {
+  const lines = [
+    describeTrace({ step: "usb-chooser-open" }, "usb"),
+    describeTrace({ step: "usb-picked", vendor: 0x239a, product: 0x811c }, "usb"),
+    describeTrace({ step: "usb-opening" }, "usb"),
+    describeTrace({ step: "usb-ready", hello: "DGT-1 fw=2.1.0 target_hz=100" }, "usb"),
+  ].flat();
+  assert.equal(lines.length, 4);
+  for (const line of lines) {
+    assert.equal(line.kind, "usb");
+    assert.doesNotMatch(line.text, /[{}]/);      // not the raw form an unknown step gets
+  }
+  assert.match(lines[1].text, /239a/i);
+  assert.match(lines[1].text, /811c/i);
+  assert.match(lines[3].text, /DGT-1 fw=2\.1\.0/);
+});
+
+test("a list of USB ports closed without a pick is an error with the browser's reason", () => {
+  const [line] = describeTrace({ step: "usb-chooser-failed", name: "NotFoundError", message: "No port selected by the user." }, "usb");
+  assert.equal(line.kind, "error");
+  assert.match(line.text, /No port selected/);
+});
+
+test("the USB failures get next steps about the cable, other programs and the firmware", () => {
+  assert.match(hintFor("No USB port was chosen."), /cable/);
+  assert.match(hintFor("Could not open the pod's USB port: Failed to open serial port."), /another program/);
+  assert.match(hintFor("The USB port opened, but nothing on it answered like a DGT-1 pod."), /firmware 2\.1/);
+});
+
+test("the Wi-Fi advice about another network is not given for a silent USB port", () => {
+  assert.doesNotMatch(hintFor("The USB port opened, but nothing on it answered like a DGT-1 pod."), /network/);
+});

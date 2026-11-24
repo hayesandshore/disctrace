@@ -1,7 +1,7 @@
 // Words and checks for the diagnostics console. Pure: no DOM and no Bluetooth
 // calls, so every line the console can print is testable.
 
-export const SITE_VERSION = "2026-11-23 review fixes";
+export const SITE_VERSION = "2026-11-24 wifi and usb";
 
 const NUS = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const CIRCUITPYTHON_SERVICES = [
@@ -35,15 +35,32 @@ export function serviceLabel(uuid) {
 
 /** The start-up checks, from facts the page gathered about the browser.
  *  adapter is true, false, null when the browser cannot say, or the text of
- *  the error the check raised. */
-export function environmentLines({ version, url, userAgent, secure, hasBluetooth, adapter }) {
+ *  the error the check raised. With link "wifi" the page was served by the
+ *  pod itself, and nothing about Bluetooth applies. */
+export function environmentLines({
+  version, url, userAgent, secure, hasBluetooth, adapter, link = "ble", origin, hasSerial,
+}) {
   const lines = [
     { kind: "check", text: `Site version ${version}, page ${url}` },
     { kind: "check", text: `Browser: ${userAgent}` },
   ];
+  if (link === "wifi") {
+    lines.push({
+      kind: "check",
+      text: `This page was served by the pod at ${origin}. Commands go to the same address over Wi-Fi; Bluetooth is not used.`,
+    });
+    return lines;
+  }
   lines.push(secure
     ? { kind: "check", text: "Secure page (https or localhost): yes" }
     : { kind: "error", text: "This page is not on https or localhost, so the browser refuses Bluetooth. Open the https address." });
+  if (hasSerial !== undefined) {
+    // The backup link for a pod on Wi-Fi firmware. Missing it is not a fault.
+    lines.push({
+      kind: "check",
+      text: `USB serial in this browser, for a pod on a cable: ${hasSerial ? "yes" : "no. Chrome or Edge on a computer has it"}`,
+    });
+  }
   if (!hasBluetooth) {
     lines.push({
       kind: "error",
@@ -64,8 +81,13 @@ export function environmentLines({ version, url, userAgent, secure, hasBluetooth
   return lines;
 }
 
-/** Turns one event from the Bluetooth transport into console lines. */
-export function describeTrace(event) {
+/** Turns one event from the link into console lines. The link's own lines
+ *  carry the kind of link in use, "ble", "wifi" or "usb", as their label. */
+export function describeTrace(event, link = "ble") {
+  return linesFor(event).map((line) => (line.kind === "ble" ? { ...line, kind: link } : line));
+}
+
+function linesFor(event) {
   const { step, ...detail } = event;
   switch (step) {
     case "chooser-open":
@@ -88,6 +110,22 @@ export function describeTrace(event) {
         kind: "ble",
         text: `UART service found. Write characteristic: ${detail.rx}. Reply characteristic: ${detail.tx}.`,
       }];
+    case "usb-chooser-open":
+      return [{ kind: "ble", text: "Opening the browser's list of USB serial ports, limited to Adafruit boards." }];
+    case "usb-picked": {
+      const hex = (value) => (value === undefined ? "unknown" : `0x${value.toString(16).padStart(4, "0")}`);
+      return [{ kind: "ble", text: `Picked a USB port (vendor ${hex(detail.vendor)}, product ${hex(detail.product)}).` }];
+    }
+    case "usb-chooser-failed":
+      return [{ kind: "error", text: `The list of USB ports closed without a port. ${detail.name}: ${detail.message}` }];
+    case "usb-opening":
+      return [{ kind: "ble", text: "Opening the pod's USB serial port." }];
+    case "usb-ready":
+      return [{ kind: "ble", text: `The pod answered on USB: ${detail.hello}. The link is ready.` }];
+    case "wifi-connecting":
+      return [{ kind: "ble", text: `Asking the pod who it is, at ${detail.url}.` }];
+    case "wifi-connected":
+      return [{ kind: "ble", text: `The pod answered after ${detail.ms} ms: ${detail.hello}. The link is ready.` }];
     case "subscribing":
       return [{ kind: "ble", text: "Subscribing to the pod's replies." }];
     case "subscribed":
@@ -120,7 +158,11 @@ export function describeTrace(event) {
     case "hung-up":
       return [{ kind: "ble", text: "Hung up, so the pod can advertise again." }];
     case "link-lost":
-      return [{ kind: "error", text: "The Bluetooth link dropped." }];
+      // The Wi-Fi link gives its reason; the browser gives none for Bluetooth.
+      return [{
+        kind: "error",
+        text: detail.message ? `The link to the pod dropped: ${detail.message}` : "The Bluetooth link dropped.",
+      }];
     case "disconnect-requested":
       return [{ kind: "ble", text: "Disconnecting on request." }];
     case "rx":
@@ -131,7 +173,9 @@ export function describeTrace(event) {
     case "tx":
       return [{
         kind: "raw",
-        text: `>> ${detail.length} bytes ${detail.withResponse ? "with" : "without"} response  ${showText(detail.text)}`,
+        // Only a Bluetooth write has a mode, with or without the pod's acknowledgement.
+        text: `>> ${detail.length} bytes${detail.withResponse === undefined ? ""
+          : ` ${detail.withResponse ? "with" : "without"} response`}  ${showText(detail.text)}`,
       }];
     default:
       return [{ kind: "ble", text: `${step} ${JSON.stringify(detail)}` }];
@@ -156,6 +200,19 @@ const HINTS = [
     + "try again; if it repeats, send this log."],
   [/Could not connect to/, "The pod was seen but the link did not open. Move closer, and make sure another phone, "
     + "tab or app is not already connected to it."],
+  [/No USB port was chosen/, "If the pod was not in the list, check the USB cable (some carry power only) and that "
+    + "the pod is switched on. It is listed as a Feather ESP32-S3 or a CircuitPython port."],
+  [/Could not open the pod's USB port/, "Only one program can use the port at a time. Close another program that may "
+    + "have it open: a serial terminal, Mu, or another tab of this page. If the cable was pulled, plug it back in."],
+  [/nothing on it answered like a DGT-1 pod/, "The port opened but the pod's program did not answer. USB needs "
+    + "firmware 2.1 or later; the Bluetooth firmware does not listen on USB. If the firmware is right, its program "
+    + "may have stopped: press the pod's reset button and try again."],
+  [/Could not reach the pod at/, "This device cannot reach the pod. Check that it is on the pod's Wi-Fi network, "
+    + "DGT-1, and close to the pod. A phone leaves a network with no internet by itself: if it asks, choose to stay "
+    + "connected, and turn mobile data off if the pod still cannot be reached. If the network is not in the list, "
+    + "the pod is off or its program is not running: look at the USB console."],
+  [/not like a DGT-1 pod/, "Something answered at the pod's address, but it is not the pod, so this device is "
+    + "probably on a different network. Join the pod's Wi-Fi network, DGT-1, and reload this page."],
   [/did not answer/, "The link is up but the pod is silent. Its program may be stuck: look at the USB console. A last "
     + "line of \"Starting sensors.\" means a sensor cable is marginal."],
   [/link dropped|Link lost/, "The pod went out of range, lost power or restarted. A drop every few seconds points to "

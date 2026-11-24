@@ -5,6 +5,8 @@
 import { PodClient } from "./client.js";
 import { SimPod } from "./transport-sim.js";
 import { BleTransport } from "./transport-ble.js";
+import { WifiTransport, servedByPod } from "./transport-wifi.js";
+import { SerialTransport } from "./transport-serial.js";
 import { ThrowStore, newId } from "./store.js";
 import { exportedCsv, parseCapturedText } from "./protocol.js";
 import { analyse, DEFAULT_RADIUS_MM } from "./metrics.js";
@@ -15,6 +17,12 @@ import { ConsoleLog, SITE_VERSION, describeTrace, environmentLines, hintFor, sta
 const params = new URLSearchParams(location.search);
 const SIM_SPEED = Number(params.get("simspeed")) || 3;   // the simulated pod runs a little fast
 const GYRO_LIMIT_RPM = 316.7;
+// True when the pod itself served this page over its Wi-Fi network. The pod is
+// then reached at the page's own address, and Bluetooth is not used.
+const WIFI = servedByPod(location);
+// True when this browser can reach a pod on a USB cable: the backup for a pod
+// on Wi-Fi firmware. Browsers only allow it on https or on this computer.
+const USB = !WIFI && SerialTransport.supported && window.isSecureContext;
 
 const client = new PodClient();
 const store = new ThrowStore();
@@ -67,7 +75,7 @@ function saveRadius(value) {
 
 // Diagnostics console ---------------------------------------------------------------
 // Everything that happens is written here with a time stamp: the browser
-// checks, each Bluetooth step, every packet in both directions, each change of
+// checks, each step of the link, every packet in both directions, each change of
 // state, and a next step when a failure is one the console knows.
 const diag = new ConsoleLog();
 const KEEP_KEY = "disctrace.console";
@@ -113,9 +121,10 @@ function consoleText() {
 }
 
 function traced(event) {
-  if (event.step === "chooser-picked") renderPod();   // the panel stops pointing at the browser's list
+  if (event.step === "chooser-picked" || event.step === "usb-picked") renderPod();   // the panel stops pointing at the browser's list
   if ((event.step === "rx" || event.step === "tx") && !$("#console-raw").checked) return;
-  for (const line of describeTrace(event)) say(line.kind, line.text);
+  const link = ui.transport?.kind === "wifi" || ui.transport?.kind === "usb" ? ui.transport.kind : "ble";
+  for (const line of describeTrace(event, link)) say(line.kind, line.text);
 }
 
 function newBle() {
@@ -124,7 +133,42 @@ function newBle() {
   return transport;
 }
 
+function newUsb() {
+  const transport = new SerialTransport();
+  transport.onTrace = traced;
+  return transport;
+}
+
+function newWifi() {
+  const transport = new WifiTransport();
+  transport.onTrace = traced;
+  return transport;
+}
+
+/** Copies text. The pod's own page is plain http, where browsers offer no
+ *  clipboard API, so the older way is the fallback. */
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = el("textarea", { class: "sr-only", readonly: true, "aria-hidden": "true" });
+  area.value = text;
+  document.body.append(area);
+  area.select();
+  const copied = document.execCommand("copy");
+  area.remove();
+  if (!copied) throw new Error("The browser refused to copy.");
+}
+
 async function runChecks() {
+  if (WIFI) {
+    const facts = {
+      link: "wifi", version: SITE_VERSION, url: location.href, origin: location.origin, userAgent: navigator.userAgent,
+    };
+    for (const line of environmentLines(facts)) say(line.kind, line.text);
+    return;
+  }
   const hasBluetooth = BleTransport.supported;
   let adapter = null;
   if (hasBluetooth && navigator.bluetooth.getAvailability) {
@@ -136,7 +180,7 @@ async function runChecks() {
   }
   const facts = {
     version: SITE_VERSION, url: location.href, userAgent: navigator.userAgent,
-    secure: window.isSecureContext, hasBluetooth, adapter,
+    secure: window.isSecureContext, hasBluetooth, adapter, hasSerial: SerialTransport.supported,
   };
   for (const line of environmentLines(facts)) say(line.kind, line.text);
 }
@@ -174,11 +218,12 @@ function startConsole() {
     });
   }
 
+  $("#console-scan").hidden = WIFI;     // there is no Bluetooth to scan on the pod's own page
   $("#console-checks").addEventListener("click", () => runChecks());
   $("#console-scan").addEventListener("click", () => scanAll());
   $("#console-copy").addEventListener("click", async (event) => {
     try {
-      await navigator.clipboard.writeText(consoleText());
+      await copyText(consoleText());
       event.target.textContent = "Copied";
     } catch {
       event.target.textContent = "Copy not allowed here";
@@ -323,6 +368,8 @@ function simulate(kind) {
 
 const ACTIONS = {
   "connect-ble": () => connect(newBle()),
+  "connect-wifi": () => connect(newWifi()),
+  "connect-usb": () => connect(newUsb()),
   "connect-sim": () => connect(new SimPod({ firmware: ui.simFirmware, speed: SIM_SPEED })),
   arm: () => arm(false),
   cancel: () => run(() => client.cancel()),
@@ -348,8 +395,11 @@ function renderPod() {
   const view = podView({
     state,
     sim: ui.transport?.kind === "sim",
-    bluetooth: BleTransport.supported && window.isSecureContext,
-    choosing: ui.transport?.kind === "ble" && !ui.transport.device,
+    bluetooth: !WIFI && BleTransport.supported && window.isSecureContext,
+    wifi: WIFI,
+    usb: USB,
+    via: ui.transport?.kind ?? null,
+    choosing: ui.transport?.kind === "usb" ? (!ui.transport.port && "usb") : ui.transport?.kind === "ble" && !ui.transport.device,
     confirmDiscard: ui.confirmDiscard,
     failure: ui.failure,
   });
@@ -555,7 +605,7 @@ function renderThrow() {
     main.replaceChildren(el("div", { class: "empty" },
       el("h2", { text: "No throw open" }),
       el("p", { text: "Connect to the pod, arm it, throw, then download. The throw opens here with its spin and "
-        + "acceleration charts. Saved throws stay on this device and open without Bluetooth." })));
+        + "acceleration charts. Saved throws stay on this device and open without the pod." })));
     return;
   }
   const { record, parsed } = ui.open;
@@ -699,7 +749,7 @@ $("#link-disconnect").addEventListener("click", () => client.disconnect());
 $("#log-copy").addEventListener("click", async (event) => {
   const text = [...$("#log").children].map((item) => item.textContent).join("\n");
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     event.target.textContent = "Copied";
   } catch {
     event.target.textContent = "Copy not allowed here";
@@ -725,3 +775,5 @@ await loadHistory();
 renderPod();
 renderTools();
 renderThrow();
+// The pod served this page, so there is no list to choose from: connect straight away.
+if (WIFI) connect(newWifi());

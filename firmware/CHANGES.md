@@ -10,6 +10,7 @@ Versions 1.0.1 and 1.1.1 were the first hardened versions. A review found gaps i
 | --- | --- | --- |
 | `firmware_1.0.2/code.py` | The firmware that was on the board (the Drive copy of 1.0) plus the fixes below. Same commands, same nine-column CSV, same five-second recording. | Flash this one now. |
 | `firmware_1.1.2/code.py` | Firmware 1.1 plus the same fixes. | When you move to 1.1. |
+| `firmware_2.1.0/code.py` | Wi-Fi instead of Bluetooth, with USB as a backup and the 1.0.2 capture. The pod serves the page itself. | To try Wi-Fi. See `WIFI.md`: it needs the `www` folder too. |
 
 ## Why
 

@@ -1,4 +1,4 @@
-// Drives a DGT-1 pod over any transport (Web Bluetooth or the simulated pod):
+// Drives a DGT-1 pod over any transport (Web Bluetooth, Wi-Fi or the simulated pod):
 // connect, STATUS, ARM, CANCEL, DUMP, INFO, BENCH. Keeps what is known about
 // the pod separate from the state of the link, and never sends ARM on its own.
 

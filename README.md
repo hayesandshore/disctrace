@@ -1,8 +1,8 @@
 # DiscTrace bench
 
-A web page for the DGT-1 disc pod. It connects over Bluetooth, arms the pod, downloads the capture after a throw, saves it on the device, and shows spin and acceleration charts. It works with firmware 1.0 (both the handoff ZIP version and the Drive version) and firmware 1.1.
+A web page for the DGT-1 disc pod. It connects over Bluetooth, Wi-Fi or a USB cable, arms the pod, downloads the capture after a throw, saves it on the device, and shows spin and acceleration charts. Over Bluetooth it works with firmware 1.0 (both the handoff ZIP version and the Drive version) and firmware 1.1. Over Wi-Fi and USB it works with firmware 2.1.0, which serves this page from the pod itself.
 
-**Status.** Everything here was tested against a simulated pod, including the Bluetooth code against a stand-in for the browser's Bluetooth API. It has not yet talked to the real pod.
+**Status.** Everything here was tested against a simulated pod: the Bluetooth and USB code against stand-ins for the browser's Bluetooth and serial APIs, and the Wi-Fi code against the Wi-Fi firmware running on a computer. It has not yet talked to the real pod.
 
 ## What you need
 
@@ -45,6 +45,16 @@ If something goes wrong, the **Diagnostics console** on the right shows every st
 - **Scan for all Bluetooth devices** lists every device nearby, not only DGT-1. An empty list means this browser or computer is not scanning. Other devices but no DGT-1 means the pod is not broadcasting.
 - The box at the bottom sends any command to a connected pod and shows the raw reply.
 
+## A pod on Wi-Fi
+
+Firmware 2.1.0 makes the pod its own Wi-Fi network, **DGT-1**, and the pod serves this page itself. Join that network and open the pod's address, `http://192.168.4.1` (or `http://192.168.4.1:8080`, see the firmware notes). The page connects by itself. No Bluetooth is involved, so any browser works, including on an iPhone.
+
+The copy of this page on GitHub Pages cannot reach a pod on Wi-Fi: browsers stop a secure site from talking to a device on the local network. It keeps working over Bluetooth, and it is the way in over USB.
+
+**USB as a backup.** With firmware 2.1.0 the pod takes the same commands on its USB serial port. Plug it into a computer, open this page over https or localhost in Chrome or Edge, and press **Connect over USB**. Close any serial terminal first: only one program can use the port.
+
+`firmware/WIFI.md` has the install steps and what to expect. `python3 firmware/package_wifi.py` collects the files that go on the board, and `python3 firmware/tests/local_pod.py` runs the Wi-Fi firmware on your computer so the page can be tried without the board.
+
 ## The spin estimate
 
 Above about 317 RPM the gyro cannot read spin, so the page estimates it from the high-g accelerometer: a sensor at distance r from the spin axis feels an inward pull of spin² × r. The distance is a setting on the throw page and defaults to 29.1 mm, the board centre in the holder CAD. A slow hand spin lets the page work out the real distance, and it offers that value as a button. The estimate holds in flight and in a steady spin. It reads high during the throw itself and at landing.
@@ -57,12 +67,14 @@ Above about 317 RPM the gyro cannot read spin, so the page estimates it from the
 | `js/protocol.js` | The pod's text protocol: splitting lines, reading replies, validating a download. |
 | `js/client.js` | Connect, STATUS, ARM, CANCEL, DUMP, INFO, BENCH, reconnecting. Never sends ARM on its own. |
 | `js/transport-ble.js` | Web Bluetooth link (Nordic UART Service). |
+| `js/transport-wifi.js` | Wi-Fi link to a pod that serves this page (firmware 2.1.0). |
+| `js/transport-serial.js` | USB link to the same firmware, through the browser's Web Serial API. |
 | `js/transport-sim.js` | The simulated pod. |
 | `js/metrics.js` | Spin estimate, distance calibration, capture numbers. |
 | `js/view.js` | Which message and buttons the pod panel shows in each state. |
 | `js/diagnostics.js` | The diagnostics console's checks and wording. |
 | `js/chart.js`, `js/store.js`, `js/app.js` | Charts, saved throws (IndexedDB), page wiring. |
 | `tests/` | Tests for the logic above. Run `npm test` (needs Node 22 or later, nothing to install). |
-| `firmware/` | The pod's CircuitPython firmware (1.0.2 and 1.1.2), its simulator tests and install notes. Start with `firmware/CHANGES.md`. |
+| `firmware/` | The pod's CircuitPython firmware (1.0.2 and 1.1.2 for Bluetooth, 2.1.0 for Wi-Fi and USB), its simulator tests and install notes. Start with `firmware/CHANGES.md`, or `firmware/WIFI.md` for Wi-Fi. |
 
 `protocol.js`, `client.js`, `metrics.js` and `view.js` use no browser features, so a native iPhone app could reuse their rules.

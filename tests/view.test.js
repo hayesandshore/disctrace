@@ -138,3 +138,60 @@ test("a connected pod that does not answer says so and offers Try again and Disc
   assert.match(v.detail, /did not answer STATUS/);
   assert.deepEqual(ids(v), ["check", "disconnect"]);
 });
+
+// A page served by the pod itself, over its Wi-Fi network ------------------------------------
+const onWifi = { bluetooth: false, wifi: true };
+
+test("on the pod's own page, disconnected offers the Wi-Fi link and never blames the browser", () => {
+  const v = view({ link: "disconnected", pod: "UNKNOWN" }, onWifi);
+  assert.deepEqual(ids(v), ["connect-wifi", "connect-sim"]);
+  assert.equal(v.primary.label, "Connect to DGT-1");
+  assert.match(v.detail, /Wi-Fi/);
+  assert.doesNotMatch(v.detail, /Bluetooth|Chrome/);
+});
+
+test("on the pod's own page, connecting never points at a Bluetooth list", () => {
+  const v = view({ link: "connecting", pod: "UNKNOWN" }, onWifi);
+  assert.doesNotMatch(v.detail, /Bluetooth/);
+  assert.deepEqual(ids(v), ["disconnect"]);
+});
+
+test("on the pod's own page, a lost link says to check the Wi-Fi network", () => {
+  const wifi = view({ link: "reconnecting", pod: "ARMED" }, onWifi);
+  assert.match(wifi.detail, /armed and waiting for a throw/);
+  assert.match(wifi.detail, /pod's Wi-Fi network/);
+  assert.doesNotMatch(view({ link: "reconnecting", pod: "ARMED" }).detail, /Wi-Fi/);   // Bluetooth has no network to check
+});
+
+// A pod on a USB cable, as a backup for Wi-Fi ------------------------------------------------
+test("where the browser can use USB serial, it is offered beside Bluetooth", () => {
+  const v = view({ link: "disconnected", pod: "UNKNOWN" }, { usb: true });
+  assert.deepEqual(ids(v), ["connect-ble", "connect-usb", "connect-sim"]);
+  assert.equal(v.secondary[0].label, "Connect over USB");
+  assert.match(v.detail, /USB/);
+});
+
+test("with USB serial but no Bluetooth, USB is the way to connect", () => {
+  const v = view({ link: "disconnected", pod: "UNKNOWN" }, { bluetooth: false, usb: true });
+  assert.deepEqual(ids(v), ["connect-usb", "connect-sim"]);
+  assert.match(v.detail, /USB cable/);
+});
+
+test("the pod's own page never offers USB, which a browser only allows on https", () => {
+  assert.deepEqual(ids(view({ link: "disconnected", pod: "UNKNOWN" }, { ...onWifi, usb: false })), ["connect-wifi", "connect-sim"]);
+});
+
+test("connecting over USB points at the browser's list of ports until one is picked", () => {
+  const choosing = view({ link: "connecting", pod: "UNKNOWN" }, { choosing: "usb" });
+  assert.match(choosing.detail, /list of USB ports/);
+  assert.doesNotMatch(choosing.detail, /Bluetooth/);
+});
+
+test("a lost USB link says to check the cable, not that the pod is out of range", () => {
+  const v = view({ link: "reconnecting", pod: "READY" }, { via: "usb" });
+  assert.match(v.title, /USB/);
+  assert.match(v.detail, /holding a capture/);
+  assert.match(v.detail, /cable/);
+  assert.doesNotMatch(`${v.title} ${v.detail}`, /range/);
+  assert.deepEqual(ids(v), ["disconnect"]);
+});

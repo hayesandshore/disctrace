@@ -25,22 +25,42 @@ function summaryFacts(summary) {
 }
 
 /** Returns { tone, title, detail, facts, progress, primary, secondary }. */
-export function podView({ state, sim, bluetooth, confirmDiscard, failure, choosing = false }) {
+export function podView({
+  state, sim, bluetooth, wifi = false, usb = false, via = null, confirmDiscard, failure, choosing = false,
+}) {
   const view = { tone: "offline", title: "", detail: "", facts: [], progress: null, primary: null, secondary: [] };
 
   if (state.link === "disconnected" || state.link === "connecting") {
     view.title = state.link === "connecting" ? "Connecting" : "Not connected";
     if (state.link === "connecting") {
-      // choosing: the browser's device list is open and nothing is picked yet.
-      view.detail = choosing
-        ? "Choose DGT-1 in the browser's Bluetooth list."
-        : "Opening the link to the pod. This can take a few seconds.";
+      // choosing: the browser's list is open and nothing is picked yet. "usb" for its list of ports.
+      view.detail = choosing === "usb"
+        ? "Choose the pod in the browser's list of USB ports. It is listed as a Feather ESP32-S3 or a CircuitPython port."
+        : choosing
+          ? "Choose DGT-1 in the browser's Bluetooth list."
+          : "Opening the link to the pod. This can take a few seconds.";
       view.secondary.push({ id: "disconnect", label: "Stop" });
       return view;
     }
-    if (bluetooth) {
+    if (wifi) {
+      // The pod served this page itself, so it is reached at the page's own address.
+      view.detail = "This page comes from the pod, over its Wi-Fi network. Keep this device on that network. "
+        + "Saved throws stay on this device either way.";
+      view.primary = { id: "connect-wifi", label: "Connect to DGT-1" };
+      view.secondary.push({ id: "connect-sim", label: "Use simulated pod" });
+    } else if (bluetooth) {
       view.detail = "Power the pod, keep it close, then connect. Saved throws stay on this device either way.";
       view.primary = { id: "connect-ble", label: "Connect to DGT-1" };
+      if (usb) {
+        // usb: this browser can reach a pod's serial port, the backup for a pod on Wi-Fi firmware.
+        view.detail += " A pod with Wi-Fi firmware can be plugged in and reached over USB instead.";
+        view.secondary.push({ id: "connect-usb", label: "Connect over USB" });
+      }
+      view.secondary.push({ id: "connect-sim", label: "Use simulated pod" });
+    } else if (usb) {
+      view.detail = "This browser can't use Bluetooth, but it can reach a pod on a USB cable (Wi-Fi firmware 2.1 or later). "
+        + "Plug the pod in, then connect. Saved throws stay on this device either way.";
+      view.primary = { id: "connect-usb", label: "Connect over USB" };
       view.secondary.push({ id: "connect-sim", label: "Use simulated pod" });
     } else {
       view.detail = "This browser can't use Bluetooth. Open this page in Chrome or Edge on a computer, "
@@ -55,6 +75,16 @@ export function podView({ state, sim, bluetooth, confirmDiscard, failure, choosi
     view.title = "Out of range. Reconnecting";
     view.detail = `The pod was last ${POD_WORDS[state.pod]}. It keeps going on its own, `
       + "and this page will pick it up again when it is back in range.";
+    if (via === "usb") {
+      // via: the kind of link in use. A cable has no range to be out of.
+      view.title = "USB link lost. Reconnecting";
+      view.detail = `The pod was last ${POD_WORDS[state.pod]}. Check the USB cable at both ends. `
+        + "This page will pick the pod up again when its port is back.";
+    }
+    if (wifi && !sim) {
+      // A phone drops a network with no internet by itself, which looks the same from here.
+      view.detail += " If it does not, check that this device is still on the pod's Wi-Fi network.";
+    }
     if (sim) view.secondary.push({ id: "sim-in-range", label: "Bring simulated pod back in range" });
     view.secondary.push({ id: "disconnect", label: "Stop" });
     return view;
