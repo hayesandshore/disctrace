@@ -1,7 +1,7 @@
 // Words and checks for the diagnostics console. Pure: no DOM and no Bluetooth
 // calls, so every line the console can print is testable.
 
-export const SITE_VERSION = "2026-11-23 subscribe timeout";
+export const SITE_VERSION = "2026-11-23 review fixes";
 
 const NUS = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const CIRCUITPYTHON_SERVICES = [
@@ -115,6 +115,8 @@ export function describeTrace(event) {
     }
     case "connect-failed":
       return [{ kind: "error", text: detail.message }];
+    case "connect-stopped":
+      return [{ kind: "ble", text: detail.message }];
     case "hung-up":
       return [{ kind: "ble", text: "Hung up, so the pod can advertise again." }];
     case "link-lost":
@@ -140,6 +142,9 @@ const HINTS = [
   [/No pod was chosen/, "If DGT-1 was not in the list, press \"Scan for all Bluetooth devices\". An empty list there "
     + "means this browser or computer is not scanning. Other devices but no DGT-1 means the pod is not "
     + "broadcasting: check its power and its USB console."],
+  // Before the missing service below, for the same reason as the subscription pair.
+  [/could not find its UART service: no answer/, "The link opened, but the pod stopped answering before its services "
+    + "were listed. Move closer, reset the pod and try again; if it repeats, send this log."],
   [/could not find its UART service/, "The device answered, but the pod's program is not running on it. Look at the "
     + "USB console for an error, and check that code.py is at the top of the CIRCUITPY drive."],
   // Before the refusal below: both say "could not subscribe", and the first match wins.
@@ -179,6 +184,14 @@ export class ConsoleLog {
     this.limit = limit;
     this.now = now;
     this.lines = [];
+    this.added = 0;          // lines ever added, so a line can be placed before or after a mark
+    this.attemptFrom = 0;    // the first line of the current connection attempt
+  }
+
+  /** Marks the start of a new connection attempt. A failure printed before
+   *  this is printed again if the new attempt fails the same way. */
+  startAttempt() {
+    this.attemptFrom = this.added;
   }
 
   add(kind, text) {
@@ -186,7 +199,8 @@ export class ConsoleLog {
     const two = (value) => String(value).padStart(2, "0");
     const stamp = `${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}.`
       + String(at.getMilliseconds()).padStart(3, "0");
-    const line = { stamp, kind, text };
+    const line = { stamp, kind, text, n: this.added };
+    this.added += 1;
     this.lines.push(line);
     if (this.lines.length > this.limit) this.lines.splice(0, this.lines.length - this.limit);
     return line;
@@ -201,7 +215,7 @@ export class ConsoleLog {
    *  packets are never repeats: polling sends the same line many times. */
   repeats(kind, text) {
     if (kind !== "error" && kind !== "note" && kind !== "hint") return false;
-    return this.lines.slice(-8).some((line) => line.text === text);
+    return this.lines.slice(-8).some((line) => line.n >= this.attemptFrom && line.text === text);
   }
 
   static format(line) {

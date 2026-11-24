@@ -24,6 +24,18 @@ test("without Web Bluetooth only the simulated pod is offered, with the reason",
   assert.match(v.detail, /Chrome or Edge/);
 });
 
+test("connecting points at the browser's list only until a pod is picked", () => {
+  const choosing = view({ link: "connecting", pod: "UNKNOWN" }, { choosing: true });
+  const picked = view({ link: "connecting", pod: "UNKNOWN" }, { choosing: false });
+  assert.match(choosing.detail, /Bluetooth list/);
+  assert.doesNotMatch(picked.detail, /list/);
+  assert.match(picked.detail, /Opening the link/);
+});
+
+test("connecting offers Stop", () => {
+  assert.deepEqual(ids(view({ link: "connecting", pod: "UNKNOWN" })), ["disconnect"]);
+});
+
 test("idle offers Arm and nothing else", () => {
   const v = view();
   assert.equal(v.primary.label, "Arm");
@@ -42,6 +54,13 @@ test("armed on the simulated pod also offers a simulated throw and hand spin", (
 
 test("recording offers no actions", () => {
   assert.deepEqual(ids(view({ pod: "RECORDING" })), []);
+});
+
+test("recording says how long this firmware records for", () => {
+  const info = { fw: "1.1.2", targetHz: 100, windowS: 10, pre: 30, cols: 12 };
+  assert.match(view({ pod: "RECORDING", firmware: "1.0" }).detail, /about five seconds/);
+  assert.match(view({ pod: "RECORDING", firmware: "1.1.2", info }).detail, /about ten seconds/);
+  assert.doesNotMatch(view({ pod: "RECORDING", firmware: null }).detail, /seconds/);   // not known yet
 });
 
 test("an unsaved capture leads with Download and save, never Arm", () => {

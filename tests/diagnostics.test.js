@@ -110,6 +110,12 @@ test("the subscription request is announced in words before its answer is known"
   assert.doesNotMatch(line.text, /[{}]/);   // not the raw form an unknown step is printed in
 });
 
+test("an attempt stopped on request is a plain line, not an error", () => {
+  const [line] = describeTrace({ step: "connect-stopped", message: "Stopped before the connection was ready." });
+  assert.notEqual(line.kind, "error");
+  assert.match(line.text, /^Stopped/);
+});
+
 test("an unknown step is still printed rather than dropped", () => {
   assert.match(describeTrace({ step: "something-new", detail: 5 })[0].text, /something-new/);
 });
@@ -127,6 +133,16 @@ test("a refused subscription and an unanswered one get different next steps", ()
   const stage = "Connected to DGT-1, but could not subscribe to its replies";
   assert.match(hintFor(`${stage}: GATT operation not permitted.`), /refused/);
   assert.match(hintFor(`${stage}: no answer after 15 seconds.`), /never answered/);
+});
+
+test("a missing UART service and an unanswered request for it get different next steps", () => {
+  const stage = "Connected to DGT-1, but could not find its UART service";
+  assert.match(hintFor(`${stage}: No Services matching UUID x found in Device.`), /not running/);
+  assert.match(hintFor(`${stage}: no answer after 15 seconds.`), /stopped answering/);
+});
+
+test("a requested stop gets no next step", () => {
+  assert.equal(hintFor("Stopped before the connection was ready."), null);
 });
 
 // State changes ----------------------------------------------------------------------------------
@@ -176,6 +192,16 @@ test("a failure reported by the link and again by the client is printed once", (
   log.add("ble", "Hung up, so the pod can advertise again.");
   assert.equal(log.repeats("note", "Connected to DGT-1, but could not find its UART service: x"), true);
   assert.equal(log.repeats("hint", "something new"), false);
+});
+
+test("the same failure in a new connection attempt is printed again", () => {
+  const log = new ConsoleLog();
+  const closed = "The device list closed without a device. NotFoundError: User cancelled the requestDevice() chooser.";
+  log.add("error", closed);
+  log.startAttempt();
+  assert.equal(log.repeats("error", closed), false);     // or the second attempt looks as if nothing happened
+  log.add("error", closed);
+  assert.equal(log.repeats("error", closed), true);      // still printed once within the attempt
 });
 
 test("commands and replies are never treated as repeats", () => {

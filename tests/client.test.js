@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { PodClient } from "../js/client.js";
 import { SimPod } from "../js/transport-sim.js";
 import { HEADER_9, HEADER_12, LineSplitter, classify } from "../js/protocol.js";
+import { BleTransport } from "../js/transport-ble.js";
+import { FakePod } from "./fake-bluetooth.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -289,6 +291,37 @@ test("stopping a reconnect leaves the link down even if an attempt then succeeds
   assert.equal(sim.connected, false);
 });
 
+test("stopping while a connection is being made leaves the page disconnected", async () => {
+  const sim = new SimPod({ speed: 2000 });
+  sim.connectDelayMs = 40000;               // 20 ms of real time at this speed
+  const client = new PodClient({ pollMs: 10 });
+  const attempt = client.connect(sim);
+  await sleep(5);
+  await client.disconnect();                // the user presses Stop
+  await attempt;
+  await sleep(60);                          // the attempt that was in flight has succeeded by now
+  assert.equal(client.state.link, "disconnected");
+  assert.equal(sim.connected, false);
+});
+
+test("a Bluetooth attempt ended by Stop is not reported as a failure", async () => {
+  const pod = new FakePod().install();
+  pod.opens = false;
+  const client = new PodClient();
+  const notes = [];
+  client.on("log", (entry) => notes.push(entry.text));
+  const attempt = client.connect(new BleTransport());
+  await sleep(5);
+  await client.disconnect();
+  let late;
+  const deadline = new Promise((resolve, reject) => {
+    late = setTimeout(() => reject(new Error("still connecting a second after Stop")), 1000);
+  });
+  await Promise.race([attempt, deadline]).finally(() => clearTimeout(late));   // resolves: the user asked for this
+  assert.equal(client.state.link, "disconnected");
+  assert.deepEqual(notes, []);
+});
+
 // A pod that does not answer -----------------------------------------------------------------
 // The link comes up, the pod receives commands, and nothing comes back.
 // Cleanup is registered up front so a failed assertion cannot leave timers running.
@@ -395,6 +428,13 @@ test("a typed command that changes the pod is reflected in the state", async () 
   const { client } = await setup();
   await client.send("ARM");
   await until(() => client.state.pod === "ARMED", "ARMED");
+});
+
+test("a typed DUMP is refused, because the pod would count the throw as downloaded", async () => {
+  const { sim, client } = await setup();
+  await armAndThrow(sim, client);
+  await assert.rejects(client.send("dump"), /Download and save/);
+  assert.ok(!sim.received.includes("DUMP"));
 });
 
 test("a typed command is refused when nothing is connected", async () => {

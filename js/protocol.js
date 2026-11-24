@@ -165,6 +165,13 @@ export class DumpCollector {
   }
 }
 
+/** The text a saved throw is exported as: what the pod sent, header first. END
+ *  is added only when the whole capture is known to be there, so a capture
+ *  that was imported without it is still marked incomplete when read back. */
+export function exportedCsv(record) {
+  return record.incomplete ? record.csv : `${record.csv}END\n`;
+}
+
 /** Finds and parses a capture in saved or pasted text (a CSV file, or a
  *  terminal log that contains one). */
 export function parseCapturedText(text) {

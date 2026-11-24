@@ -11,18 +11,20 @@ async function step(problem, work) {
   try {
     return await work();
   } catch (error) {
+    if (error.stopped) throw error;   // asked for, so not a failure of this stage
     throw new Error(`${problem}: ${error.message}`, { cause: error });
   }
 }
 
 // Stops waiting for a request the browser never finishes. Without a limit the
 // page stays "connecting" for ever while it holds the pod's only connection.
-function answered(request, ms) {
+// Also ends when `stopped` rejects: that is how an attempt is stopped on request.
+function answered(request, ms, stopped) {
   let timer;
   const silence = new Promise((resolve, reject) => {
     timer = setTimeout(() => reject(new Error(`no answer after ${ms / 1000} seconds.`)), ms);
   });
-  return Promise.race([request, silence]).finally(() => clearTimeout(timer));
+  return Promise.race(stopped ? [request, silence, stopped] : [request, silence]).finally(() => clearTimeout(timer));
 }
 
 // The properties a characteristic says it has, for the console.
@@ -32,10 +34,17 @@ function properties(characteristic) {
 }
 
 export class BleTransport {
-  constructor({ subscribeTimeoutMs = 15000, servicesTimeoutMs = 3000 } = {}) {
-    // How long the pod gets to answer before the attempt is given up.
+  constructor({
+    connectTimeoutMs = 20000, discoverTimeoutMs = 15000, subscribeTimeoutMs = 15000, servicesTimeoutMs = 3000,
+  } = {}) {
+    // How long each stage gets before the attempt is given up.
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.discoverTimeoutMs = discoverTimeoutMs;
     this.subscribeTimeoutMs = subscribeTimeoutMs;
     this.servicesTimeoutMs = servicesTimeoutMs;
+    this.attempts = 0;                // connection attempts started, to tell a stale one from the latest
+    this.stop = null;                 // ends the attempt in flight, while there is one
+    this.writes = Promise.resolve();  // writes go out one at a time
     this.kind = "ble";
     this.name = "DGT-1";
     this.device = null;
@@ -105,17 +114,28 @@ export class BleTransport {
   async connect() {
     if (!this.device) await this.choose();
     const { gatt } = this.device;
+    const attempt = (this.attempts += 1);
+    // disconnect() rejects this to end the attempt while it is waiting on the pod.
+    const stopped = new Promise((resolve, reject) => {
+      this.stop = () => reject(Object.assign(new Error("Stopped before the connection was ready."), { stopped: true }));
+    });
+    stopped.catch(() => {});   // nothing may be waiting on it at the moment it is rejected
+    let opening = null;
     let server = null;
     try {
       const started = Date.now();
       this.trace("gatt-connecting");
-      server = await step(`Could not connect to ${this.name}`, () => gatt.connect());
+      opening = gatt.connect();
+      server = await step(`Could not connect to ${this.name}`,
+        () => answered(opening, this.connectTimeoutMs, stopped));
       this.trace("gatt-connected", { ms: Date.now() - started });
-      await step(`Connected to ${this.name}, but could not find its UART service`, async () => {
+      const findUart = async () => {
         const service = await server.getPrimaryService(NUS_SERVICE);
         this.rx = await service.getCharacteristic(NUS_RX);
         this.tx = await service.getCharacteristic(NUS_TX);
-      });
+      };
+      await step(`Connected to ${this.name}, but could not find its UART service`,
+        () => answered(findUart(), this.discoverTimeoutMs, stopped));
       this.trace("uart-found", { rx: properties(this.rx), tx: properties(this.tx) });
       this.decoder = new TextDecoder();
       this.tx.addEventListener("characteristicvaluechanged", this.handleValue);
@@ -123,21 +143,34 @@ export class BleTransport {
       // console's last line while the page waits.
       this.trace("subscribing");
       await step(`Connected to ${this.name}, but could not subscribe to its replies`,
-        () => answered(this.tx.startNotifications(), this.subscribeTimeoutMs));
+        () => answered(this.tx.startNotifications(), this.subscribeTimeoutMs, stopped));
       this.trace("subscribed");
     } catch (error) {
-      this.trace("connect-failed", { message: error.message });
+      this.trace(error.stopped ? "connect-stopped" : "connect-failed", { message: error.message });
       // What does the device offer instead? Only asked after a failure, so a
       // healthy connection takes exactly the steps it always did.
-      if (server && gatt.connected) await this.traceServices(server);
+      if (server && gatt.connected && !error.stopped) await this.traceServices(server);
       // Never keep a half-open link. The pod has one connection and stops
       // advertising while anything holds it, so nothing could find it again.
       if (gatt.connected) {
         gatt.disconnect();
         this.trace("hung-up");
+      } else if (opening && !server) {
+        // The browser may be unable to cancel an attempt that is still in
+        // flight. If the link opens after all, and no later attempt is using
+        // it, hang up then.
+        opening.then(() => {
+          if (this.attempts === attempt && !this.connected && gatt.connected) {
+            gatt.disconnect();
+            this.trace("hung-up");
+          }
+        }, () => {});
       }
       throw error;
+    } finally {
+      this.stop = null;
     }
+    this.writes = Promise.resolve();   // nothing from an earlier link may hold up this one
     this.connected = true;
   }
 
@@ -155,17 +188,25 @@ export class BleTransport {
     const wasConnected = this.connected;
     this.connected = false;   // so the browser's own event is not reported a second time
     this.trace("disconnect-requested");
+    if (this.stop) this.stop();   // first, so an attempt in flight ends as stopped, not as failed
     if (this.device?.gatt.connected) this.device.gatt.disconnect();
     if (wasConnected) this.onDisconnect();
   }
 
   /** A successful write only means the bytes were sent; the caller waits for
    *  the pod's text reply before changing any state. */
-  async write(text) {
-    const bytes = new TextEncoder().encode(text);
-    const withResponse = !this.rx.properties.writeWithoutResponse;
-    this.trace("tx", { text, length: bytes.length, withResponse });
-    if (withResponse) await this.rx.writeValueWithResponse(bytes);
-    else await this.rx.writeValueWithoutResponse(bytes);
+  write(text) {
+    const send = async () => {
+      const bytes = new TextEncoder().encode(text);
+      const withResponse = !this.rx.properties.writeWithoutResponse;
+      this.trace("tx", { text, length: bytes.length, withResponse });
+      if (withResponse) await this.rx.writeValueWithResponse(bytes);
+      else await this.rx.writeValueWithoutResponse(bytes);
+    };
+    // One at a time: the browser refuses a write that starts while another is
+    // still going, and a typed command can arrive during the page's own.
+    const result = this.writes.then(send, send);
+    this.writes = result.catch(() => {});
+    return result;
   }
 }

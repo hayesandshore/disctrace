@@ -9,6 +9,8 @@ const POD_WORDS = {
   READY: "holding a capture", SENSOR_ERROR: "reporting a sensor error", UNKNOWN: "in an unknown state",
 };
 
+const SECONDS = { 5: "five", 10: "ten" };
+
 function summaryFacts(summary) {
   return [
     { label: "Samples", value: number(summary.samples) },
@@ -23,13 +25,17 @@ function summaryFacts(summary) {
 }
 
 /** Returns { tone, title, detail, facts, progress, primary, secondary }. */
-export function podView({ state, sim, bluetooth, confirmDiscard, failure }) {
+export function podView({ state, sim, bluetooth, confirmDiscard, failure, choosing = false }) {
   const view = { tone: "offline", title: "", detail: "", facts: [], progress: null, primary: null, secondary: [] };
 
   if (state.link === "disconnected" || state.link === "connecting") {
     view.title = state.link === "connecting" ? "Connecting" : "Not connected";
     if (state.link === "connecting") {
-      view.detail = "Choose DGT-1 in the browser's Bluetooth list.";
+      // choosing: the browser's device list is open and nothing is picked yet.
+      view.detail = choosing
+        ? "Choose DGT-1 in the browser's Bluetooth list."
+        : "Opening the link to the pod. This can take a few seconds.";
+      view.secondary.push({ id: "disconnect", label: "Stop" });
       return view;
     }
     if (bluetooth) {
@@ -70,11 +76,15 @@ export function podView({ state, sim, bluetooth, confirmDiscard, failure }) {
       }
       view.secondary.push({ id: "cancel", label: "Cancel" });
       break;
-    case "RECORDING":
+    case "RECORDING": {
       view.tone = "recording";
       view.title = "Recording";
-      view.detail = "The pod is busy capturing and answers nothing until it finishes, about ten seconds.";
+      // Firmware 1.1 reports its window in INFO; firmware 1.0 records for five seconds.
+      const seconds = state.info?.windowS ?? (state.firmware === "1.0" ? 5 : null);
+      view.detail = "The pod is busy capturing and answers nothing until it finishes"
+        + (seconds ? `, about ${SECONDS[seconds] ?? seconds} seconds.` : ".");
       break;
+    }
     case "READY":
       view.facts = state.summary ? summaryFacts(state.summary) : [];
       if (state.download) {

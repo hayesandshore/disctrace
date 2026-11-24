@@ -39,7 +39,10 @@ function within(ms, promise) {
 }
 
 // Short limits, so a pod that never answers is given up on within a test.
-const QUICK = { subscribeTimeoutMs: 20, servicesTimeoutMs: 20 };
+const QUICK = { connectTimeoutMs: 20, discoverTimeoutMs: 20, subscribeTimeoutMs: 20, servicesTimeoutMs: 20 };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const steps = (seen) => seen.trace.map((event) => event.step).filter((step) => step !== "rx" && step !== "tx");
 
 // The healthy path -----------------------------------------------------------------
 test("a healthy pod connects and a long reply arrives as one piece of text", async () => {
@@ -50,6 +53,14 @@ test("a healthy pod connects and a long reply arrives as one piece of text", asy
   assert.deepEqual(pod.commands, ["HELLO"]);
   assert.equal(seen.text, "State IDLE. Commands: ARM STATUS DUMP CANCEL\r\n");   // three notifications
   assert.equal(transport.name, "DGT-1");
+});
+
+test("two writes sent together both reach the pod, one after the other", async () => {
+  const pod = new FakePod();
+  const { transport } = open(pod);
+  await transport.connect();
+  await Promise.all([transport.write("STATUS\n"), transport.write("INFO\n")]);
+  assert.deepEqual(pod.commands, ["STATUS", "INFO"]);
 });
 
 test("disconnecting on request hangs up and reports the loss once", async () => {
@@ -111,6 +122,71 @@ test("a failed subscription also hangs up again", async () => {
 });
 
 // Never waiting for ever -----------------------------------------------------------------
+test("a link that never opens is given up on and reported as that", async () => {
+  const pod = new FakePod();
+  pod.opens = false;
+  const error = await within(1000, failure(open(pod, QUICK).transport.connect()));
+  assert.match(error.message, /Could not connect to DGT-1/);
+  assert.match(error.message, /no answer after 0\.02 seconds/);
+});
+
+test("a link that opens after the page gave up on it is hung up again", async () => {
+  const pod = new FakePod();
+  pod.opens = false;
+  const { transport, seen } = open(pod, QUICK);
+  await within(1000, failure(transport.connect()));
+  pod.openLate();
+  await sleep(5);
+  assert.equal(pod.device.gatt.connected, false);   // nobody is using it, and it would keep the pod from advertising
+  assert.equal(seen.lost, 0);
+});
+
+test("a pod that never lists its UART service is given up on and hung up", async () => {
+  const pod = new FakePod();
+  pod.discovers = false;
+  const error = await within(1000, failure(open(pod, QUICK).transport.connect()));
+  assert.match(error.message, /could not find its UART service/);
+  assert.match(error.message, /no answer after 0\.02 seconds/);
+  assert.equal(pod.device.gatt.connected, false);
+});
+
+test("an unanswered service request gets advice about a silent pod, not about its program", async () => {
+  const pod = new FakePod();
+  pod.discovers = false;
+  const error = await within(1000, failure(open(pod, QUICK).transport.connect()));
+  assert.match(hintFor(error.message), /stopped answering/);
+});
+
+// Stopping an attempt on request -------------------------------------------------------------
+// These use the normal, long limits: only the stop can end the attempt in time.
+test("stopping while the link is being opened ends the attempt at once, and not as a failure", async () => {
+  const pod = new FakePod();
+  pod.opens = false;
+  const { transport, seen } = open(pod);
+  const attempt = failure(transport.connect());
+  await sleep(5);
+  await transport.disconnect();
+  const error = await within(1000, attempt);
+  assert.match(error.message, /^Stopped/);
+  assert.ok(steps(seen).includes("connect-stopped"));
+  assert.ok(!steps(seen).includes("connect-failed"));
+  assert.equal(seen.lost, 0);
+});
+
+test("stopping while waiting for the subscription hangs up", async () => {
+  const pod = new FakePod();
+  pod.confirms = false;
+  const { transport, seen } = open(pod);
+  const attempt = failure(transport.connect());
+  await sleep(5);
+  assert.equal(steps(seen).at(-1), "subscribing");
+  await transport.disconnect();
+  await within(1000, attempt);
+  assert.equal(pod.device.gatt.connected, false);
+  assert.ok(steps(seen).includes("connect-stopped"));   // asked for, so not reported as a failed subscription
+  assert.ok(!steps(seen).includes("connect-failed"));
+});
+
 test("a subscription the pod never answers is given up on and reported as that", async () => {
   const pod = new FakePod();
   pod.confirms = false;
@@ -184,7 +260,6 @@ test("a pod that drops out is reported once and can be connected again", async (
 });
 
 // Telling the console what happened -----------------------------------------------------------
-const steps = (seen) => seen.trace.map((event) => event.step).filter((step) => step !== "rx" && step !== "tx");
 
 test("a healthy connection is traced step by step, in order", async () => {
   const { transport, seen } = open(new FakePod());

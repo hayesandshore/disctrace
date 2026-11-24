@@ -28,6 +28,12 @@ class Gatt {
 
   async connect() {
     if (!this.pod.inRange) throw new DOMException("Connection attempt failed.", "NetworkError");
+    if (!this.pod.opens) {
+      // Never answered, and disconnect() does not cancel it: the least a browser may do.
+      await new Promise((resolve) => {
+        this.finishOpening = resolve;
+      });
+    }
     this.connected = true;
     return this;
   }
@@ -52,6 +58,7 @@ class Gatt {
     if (!this.connected) {
       throw new DOMException("GATT Server is disconnected. Cannot retrieve services.", "NetworkError");
     }
+    if (!this.pod.discovers) return unanswered(this.device);
     if (!this.pod.uart || uuid !== SERVICE) {
       throw new DOMException(`No Services matching UUID ${uuid} found in Device.`, "NotFoundError");
     }
@@ -97,6 +104,8 @@ export class FakePod {
   constructor() {
     this.chooser = "picked";   // "cancelled": the person closes the browser's list
     this.inRange = true;       // false: the radio link cannot be opened
+    this.opens = true;         // false: opening the link is never answered, until openLate()
+    this.discovers = true;     // false: asking for the UART service is never answered
     this.uart = true;          // false: the pod's program is not running, so no UART service
     this.notifiable = true;    // false: the pod refuses the subscription
     this.confirms = true;      // false: the subscription request is never answered
@@ -108,7 +117,15 @@ export class FakePod {
     this.inbox = "";
     this.device = new Device(this);
     this.tx = new TxCharacteristic(this);
-    const write = async (bytes) => this.receive(bytes);
+    // Like Chrome, a write that starts while another is still going is refused.
+    let writing = false;
+    const write = async (bytes) => {
+      if (writing) throw new DOMException("GATT operation already in progress.", "NetworkError");
+      writing = true;
+      await Promise.resolve();
+      writing = false;
+      this.receive(bytes);
+    };
     this.rx = {
       uuid: RX,
       properties: { write: true, writeWithoutResponse: true },
@@ -130,6 +147,11 @@ export class FakePod {
     };
     Object.defineProperty(globalThis, "navigator", { value: { bluetooth }, configurable: true });
     return this;
+  }
+
+  /** A link that was never answered opens after all, as a slow radio can. */
+  openLate() {
+    this.device.gatt.finishOpening?.();
   }
 
   /** The pod goes away: power off, out of range, or it hangs up. */

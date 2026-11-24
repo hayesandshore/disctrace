@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  HEADER_9, HEADER_12, LineSplitter, classify, parseRow, DumpCollector, parseCapturedText,
+  HEADER_9, HEADER_12, LineSplitter, classify, parseRow, DumpCollector, parseCapturedText, exportedCsv,
 } from "../js/protocol.js";
 
 // The original handoff fixtures were saved with CRLF; normalise so tests choose the line ending.
@@ -216,6 +216,20 @@ test("import accepts a saved CSV without END but marks it incomplete", () => {
   assert.equal(got.rows.length, 3);
   assert.equal(got.complete, false);
   assert.equal(got.summary, null);
+});
+
+test("a complete capture is exported as the pod sent it, ending in END", () => {
+  const { csv } = parseCapturedText(fixture("fw11/dump.txt"));
+  const text = exportedCsv({ csv, incomplete: false });
+  assert.ok(text.endsWith("\nEND\n"));
+  assert.equal(parseCapturedText(text).complete, true);
+});
+
+test("an incomplete capture is exported without END, so it is still marked incomplete when imported", () => {
+  const { csv } = parseCapturedText(fixture("fw11/dump.txt").replace("END\n", ""));
+  const text = exportedCsv({ csv, incomplete: true });
+  assert.equal(parseCapturedText(text).complete, false);
+  assert.equal(parseCapturedText(text).rows.length, 3);
 });
 
 test("import rejects text with no capture in it", () => {

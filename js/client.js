@@ -78,9 +78,20 @@ export class PodClient {
     try {
       await transport.connect();
     } catch (error) {
+      if (this.intentional) {
+        // The user pressed Stop while this attempt was in flight: not a failure.
+        this.set({ link: "disconnected" });
+        return;
+      }
       this.log("info", error.message);
       this.set({ link: "disconnected" });
       throw error;
+    }
+    if (this.intentional || this.transport !== transport) {
+      // Stop was pressed and the attempt succeeded anyway: hang up again.
+      await transport.disconnect();
+      if (this.transport === transport) this.set({ link: "disconnected" });
+      return;
     }
     await this.afterConnect();
   }
@@ -213,6 +224,12 @@ export class PodClient {
    *  wait for an answer: whatever comes back is handled like any other line. */
   async send(text) {
     if (this.state.link !== "connected") throw new Error("Not connected to the pod.");
+    if (text.trim().toUpperCase() === "DUMP") {
+      // The pod counts a DUMP that reaches END as downloaded and stops
+      // protecting the throw, but only the Download button saves it.
+      throw new Error("DUMP is not sent from here: the pod would count the throw as downloaded "
+        + "without it being saved. Use Download and save.");
+    }
     this.log("tx", text);
     await this.transport.write(`${text}\n`);
   }

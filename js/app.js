@@ -6,7 +6,7 @@ import { PodClient } from "./client.js";
 import { SimPod } from "./transport-sim.js";
 import { BleTransport } from "./transport-ble.js";
 import { ThrowStore, newId } from "./store.js";
-import { parseCapturedText } from "./protocol.js";
+import { exportedCsv, parseCapturedText } from "./protocol.js";
 import { analyse, DEFAULT_RADIUS_MM } from "./metrics.js";
 import { lineChart, chartGroup } from "./chart.js";
 import { podView } from "./view.js";
@@ -113,6 +113,7 @@ function consoleText() {
 }
 
 function traced(event) {
+  if (event.step === "chooser-picked") renderPod();   // the panel stops pointing at the browser's list
   if ((event.step === "rx" || event.step === "tx") && !$("#console-raw").checked) return;
   for (const line of describeTrace(event)) say(line.kind, line.text);
 }
@@ -348,6 +349,7 @@ function renderPod() {
     state,
     sim: ui.transport?.kind === "sim",
     bluetooth: BleTransport.supported && window.isSecureContext,
+    choosing: ui.transport?.kind === "ble" && !ui.transport.device,
     confirmDiscard: ui.confirmDiscard,
     failure: ui.failure,
   });
@@ -535,8 +537,7 @@ async function importText(text, name) {
 }
 
 function exportCsv(record) {
-  // Same text the pod sent: header, rows, END.
-  const url = URL.createObjectURL(new Blob([`${record.csv}END\n`], { type: "text/csv" }));
+  const url = URL.createObjectURL(new Blob([exportedCsv(record)], { type: "text/csv" }));
   const slug = record.label.replace(/[^\w-]+/g, "-").replace(/^-|-$/g, "") || "throw";
   const saved = new Date(record.savedAt);   // local date, so the file name matches what the page shows
   const day = [saved.getFullYear(), saved.getMonth() + 1, saved.getDate()].map((part) => String(part).padStart(2, "0")).join("-");
@@ -683,6 +684,8 @@ client.on("change", () => {
     ui.confirmDiscard = false;
     ui.failure = null;
   }
+  // A new attempt may fail the same way as the last one, and must say so again.
+  if (client.state.link === "connecting" && lastState.link !== "connecting") diag.startAttempt();
   for (const change of stateChanges(lastState, client.state)) say("state", change);
   lastState = { ...client.state };
   renderConsoleStatus();
